@@ -55,6 +55,36 @@ test("parseConfig requires trusted roots when script runner is enabled", () => {
   );
 });
 
+test("parseConfig rejects missing values for separate flag arguments", () => {
+  assert.throws(
+    () => parseConfig(["--account", "--enable-writes=true"], "0.1.0"),
+    /Missing value for --account/,
+  );
+});
+
+test("parseConfig rejects empty values for equals-style flag arguments", () => {
+  assert.throws(
+    () => parseConfig(["--account="], "0.1.0"),
+    /Missing value for --account/,
+  );
+});
+
+test("parseConfig rejects missing values for repeatable flags", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--account=TestAccount",
+          "--enable-script-runner=true",
+          "--script-runner-root",
+          "--op-cli-path=/usr/local/bin/op",
+        ],
+        "0.1.0",
+      ),
+    /Missing value for --script-runner-root/,
+  );
+});
+
 test("parseConfig requires absolute op path when script runner is enabled", () => {
   assert.throws(
     () =>

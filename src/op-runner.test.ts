@@ -241,6 +241,39 @@ test("manual-session auth does not refresh for generic app auth failures", async
   assert.equal(commandCalls.length, 1);
 });
 
+test("service-account auth does not rerun scripts after auth-looking failures", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: "npm",
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([
+    processResult({
+      stderr:
+        "You are not currently signed in to your 1Password account. Run `op signin`.",
+      exitCode: 1,
+    }),
+  ]);
+  const config = createConfig({
+    authMode: "service-account",
+    serviceAccountToken: "service-token",
+    opCliAuthMode: "service-account",
+    scriptRunnerRoots: [workspace],
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.run(workspace, "deploy");
+  const commandCalls = processRunner.calls.filter((call) => call.command === "npm");
+
+  assert.equal(result.refreshedAuth, false);
+  assert.equal(commandCalls.length, 1);
+});
+
 test("service-account auth injects OP_SERVICE_ACCOUNT_TOKEN into a minimal env", async () => {
   process.env.OP_MCP_TEST_SECRET = "must-not-leak";
   const processRunner = new FakeProcessRunner([]);

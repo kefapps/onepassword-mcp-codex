@@ -516,6 +516,9 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     if (!isAuthenticationFailure(firstResult)) {
       return firstResult;
     }
+    if (firstResult.authMode !== "manual-session") {
+      return firstResult;
+    }
 
     this.sessionManager.reset();
     const refreshedResult = await runOnce();

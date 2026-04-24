@@ -32,16 +32,26 @@ const DEFAULT_AUDIT_LOG_PATH = join(
   "audit.jsonl",
 );
 
+function validateFlagValue(name: string, value: string | undefined): string {
+  if (!value || value.startsWith("--")) {
+    throw new Error(
+      `Missing value for --${name}. Use --${name}=<value> or --${name} <value>.`,
+    );
+  }
+
+  return value;
+}
+
 function readFlagValue(args: string[], name: string): string | undefined {
   const prefix = `--${name}=`;
   const prefixed = args.find((arg) => arg.startsWith(prefix));
   if (prefixed) {
-    return prefixed.slice(prefix.length);
+    return validateFlagValue(name, prefixed.slice(prefix.length));
   }
 
   const index = args.indexOf(`--${name}`);
   if (index >= 0) {
-    return args[index + 1];
+    return validateFlagValue(name, args[index + 1]);
   }
 
   return undefined;
@@ -54,11 +64,11 @@ function readFlagValues(args: string[], name: string): string[] {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg.startsWith(prefix)) {
-      values.push(arg.slice(prefix.length));
+      values.push(validateFlagValue(name, arg.slice(prefix.length)));
       continue;
     }
-    if (arg === `--${name}` && args[index + 1]) {
-      values.push(args[index + 1]!);
+    if (arg === `--${name}`) {
+      values.push(validateFlagValue(name, args[index + 1]));
       index += 1;
     }
   }
