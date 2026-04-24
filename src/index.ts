@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
 
   console.error(
-    `[onepassword-mcp-codex] auth=${config.authMode} reveal=${config.enableSecretReveal} scriptRunner=${config.enableScriptRunner} opAuth=${config.opCliAuthMode} audit=${config.auditLogPath}`,
+    `[onepassword-mcp-codex] auth=${config.authMode} reveal=${config.enableSecretReveal} writes=${config.enableWrites} destructive=${config.enableDestructiveActions} permissions=${config.enablePermissionMutation} scriptRunner=${config.enableScriptRunner} opAuth=${config.opCliAuthMode} audit=${config.auditLogPath}`,
   );
 
   await server.connect(transport);

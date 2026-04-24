@@ -257,6 +257,7 @@ class FakeOpScriptRunner implements OpScriptRunner {
       cwd: workspaceRoot,
       command: "npm",
       args: ["run", commandId],
+      sensitiveOutput: commandId === "print-secret",
       authMode: "manual-session" as const,
       refreshedAuth: false,
       stdout: "done\n",
@@ -290,6 +291,9 @@ async function createClientAndServer(
   enableSecretReveal = false,
   options: {
     enableScriptRunner?: boolean;
+    enableWrites?: boolean;
+    enableDestructiveActions?: boolean;
+    enablePermissionMutation?: boolean;
     scriptRunner?: OpScriptRunner;
   } = {},
 ) {
@@ -297,7 +301,11 @@ async function createClientAndServer(
     authMode: "desktop",
     account: "TestAccount",
     enableSecretReveal,
+    enableWrites: options.enableWrites ?? false,
+    enableDestructiveActions: options.enableDestructiveActions ?? false,
+    enablePermissionMutation: options.enablePermissionMutation ?? false,
     enableScriptRunner: options.enableScriptRunner ?? false,
+    scriptRunnerRoots: ["/workspace"],
     opCliPath: "op",
     opCliAuthMode: "auto",
     auditLogPath: "/tmp/onepassword-mcp-codex-test-audit.jsonl",
@@ -340,8 +348,19 @@ test("registers expected tools", async () => {
   assert(tools.tools.some((tool) => tool.name === "vault_permissions_get"));
   assert(tools.tools.some((tool) => tool.name === "password_generate"));
   assert(tools.tools.some((tool) => tool.name === "password_read"));
-  assert(tools.tools.some((tool) => tool.name === "password_update"));
+  assert(!tools.tools.some((tool) => tool.name === "password_update"));
   assert(!tools.tools.some((tool) => tool.name === "op_script_run"));
+});
+
+test("registers write tools only when enabled", async () => {
+  const { client } = await createClientAndServer(false, { enableWrites: true });
+  const tools = await client.listTools();
+
+  assert(tools.tools.some((tool) => tool.name === "password_create"));
+  assert(tools.tools.some((tool) => tool.name === "password_update"));
+  assert(tools.tools.some((tool) => tool.name === "vault_create"));
+  assert(tools.tools.some((tool) => tool.name === "item_update"));
+  assert(!tools.tools.some((tool) => tool.name === "item_delete"));
 });
 
 test("registers script runner tools when enabled", async () => {
@@ -522,7 +541,9 @@ test("password generators return plaintext values", async () => {
 });
 
 test("password create stores a generated secret and returns redacted metadata", async () => {
-  const { client, auditLogger, service } = await createClientAndServer();
+  const { client, auditLogger, service } = await createClientAndServer(false, {
+    enableWrites: true,
+  });
   const result = await client.callTool({
     name: "password_create",
     arguments: {
@@ -552,7 +573,9 @@ test("password create stores a generated secret and returns redacted metadata", 
 });
 
 test("password update can replace a field with a provided password", async () => {
-  const { client, auditLogger, service } = await createClientAndServer();
+  const { client, auditLogger, service } = await createClientAndServer(false, {
+    enableWrites: true,
+  });
   const result = await client.callTool({
     name: "password_update",
     arguments: {
@@ -680,21 +703,50 @@ test("script runner lists and runs allowlisted commands with audit", async () =>
   });
   const textContent = run.content as Array<{ type: string; text?: string }>;
   const payload = run.structuredContent as {
-    stdout: string;
     exitCode: number;
     authMode: string;
+    outputReturned: boolean;
+    outputState: string;
   };
 
   assert.equal(run.isError, false);
-  assert.equal(textContent[0]?.text, "done");
-  assert.equal(payload.stdout, "done\n");
+  assert.match(textContent[0]?.text ?? "", /withheld/);
   assert.equal(payload.exitCode, 0);
   assert.equal(payload.authMode, "manual-session");
+  assert.equal(payload.outputReturned, false);
+  assert.equal(payload.outputState, "withheld");
   assert.equal(auditLogger.events.at(-1)?.action, "op_script_run");
   assert.equal(auditLogger.events.at(-1)?.outcome, "success");
 });
 
-test("script runner blocks sensitive output without reveal acknowledgement", async () => {
+test("script runner only returns command output with reveal acknowledgement", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  const { client } = await createClientAndServer(true, {
+    enableScriptRunner: true,
+    scriptRunner,
+  });
+
+  const run = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      commandId: "deploy",
+      reason: "Need to inspect command output",
+      returnOutput: true,
+      acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT",
+    },
+  });
+  const payload = run.structuredContent as {
+    stdout: string;
+    outputReturned: boolean;
+  };
+
+  assert.equal(run.isError, false);
+  assert.equal(payload.outputReturned, true);
+  assert.equal(payload.stdout, "done\n");
+});
+
+test("script runner blocks output return without reveal acknowledgement", async () => {
   const { client } = await createClientAndServer(false, {
     enableScriptRunner: true,
     scriptRunner: new FakeOpScriptRunner(),
@@ -706,6 +758,7 @@ test("script runner blocks sensitive output without reveal acknowledgement", asy
       workspaceRoot: "/workspace",
       commandId: "print-secret",
       reason: "Need to inspect sensitive command output",
+      returnOutput: true,
     },
   });
 

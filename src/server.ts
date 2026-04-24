@@ -179,6 +179,52 @@ function assertScriptRunnerEnabled(config: ServerConfig): void {
   }
 }
 
+function assertWritesEnabled(config: ServerConfig): void {
+  if (!config.enableWrites) {
+    throw new Error(
+      "1Password write tools are disabled. Restart the server with --enable-writes=true to allow this tool.",
+    );
+  }
+}
+
+function assertDestructiveActionsEnabled(config: ServerConfig): void {
+  if (!config.enableDestructiveActions) {
+    throw new Error(
+      "1Password destructive tools are disabled. Restart the server with --enable-destructive-actions=true to allow this tool.",
+    );
+  }
+}
+
+function assertPermissionMutationEnabled(config: ServerConfig): void {
+  if (!config.enablePermissionMutation) {
+    throw new Error(
+      "1Password permission mutation tools are disabled. Restart the server with --enable-permission-mutation=true to allow this tool.",
+    );
+  }
+}
+
+function sanitizeAuditString(value: string): string {
+  return value
+    .replace(/op:\/\/[^\s"']+/g, "[REDACTED_REFERENCE]")
+    .replace(/OP_SESSION(?:_[A-Z0-9_]+)?=[^\s"']+/gi, "OP_SESSION=[REDACTED]")
+    .replace(/OP_SERVICE_ACCOUNT_TOKEN=[^\s"']+/gi, "OP_SERVICE_ACCOUNT_TOKEN=[REDACTED]");
+}
+
+function sanitizeAuditValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    return sanitizeAuditString(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeAuditValue(entry));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, sanitizeAuditValue(entry)]),
+    );
+  }
+  return value;
+}
+
 function recordAudit(
   auditLogger: AuditLogger,
   action: string,
@@ -189,8 +235,8 @@ function recordAudit(
   auditLogger.record({
     action,
     outcome,
-    metadata,
-    errorMessage,
+    metadata: sanitizeAuditValue(metadata) as Record<string, unknown>,
+    errorMessage: errorMessage ? sanitizeAuditString(errorMessage) : undefined,
   });
 }
 
@@ -265,13 +311,13 @@ function commandOutputText(result: {
   timedOut: boolean;
   outputTruncated: boolean;
   errorMessage?: string;
-}): string {
+}, includeOutput: boolean): string {
   const sections: string[] = [];
 
-  if (result.stdout) {
+  if (includeOutput && result.stdout) {
     sections.push(result.stdout.trimEnd());
   }
-  if (result.stderr) {
+  if (includeOutput && result.stderr) {
     sections.push(result.stderr.trimEnd());
   }
   if (result.errorMessage) {
@@ -279,6 +325,9 @@ function commandOutputText(result: {
   }
   if (sections.length === 0) {
     sections.push(`Command completed with exit code ${result.exitCode ?? "unknown"}.`);
+  }
+  if (!includeOutput) {
+    sections.push("Command stdout/stderr withheld by default.");
   }
   if (result.timedOut) {
     sections.push("Command timed out.");
@@ -288,6 +337,51 @@ function commandOutputText(result: {
   }
 
   return sections.join("\n");
+}
+
+function scriptRunStructuredContent(
+  result: {
+    commandId: string;
+    workspaceRoot: string;
+    cwd: string;
+    authMode: string;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    timedOut: boolean;
+    outputTruncated: boolean;
+    durationMs: number;
+    refreshedAuth: boolean;
+    sensitiveOutput: boolean;
+    stdout: string;
+    stderr: string;
+    errorMessage?: string;
+  },
+  includeOutput: boolean,
+): Record<string, unknown> {
+  return {
+    commandId: result.commandId,
+    workspaceRoot: result.workspaceRoot,
+    cwd: result.cwd,
+    authMode: result.authMode,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    outputTruncated: result.outputTruncated,
+    durationMs: result.durationMs,
+    refreshedAuth: result.refreshedAuth,
+    sensitiveOutput: result.sensitiveOutput,
+    outputReturned: includeOutput,
+    ...(includeOutput
+      ? {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          errorMessage: result.errorMessage,
+        }
+      : {
+          outputState: "withheld",
+          errorMessage: result.errorMessage,
+        }),
+  };
 }
 
 export function createOnePasswordMcpServer(
@@ -314,6 +408,10 @@ export function createOnePasswordMcpServer(
       jsonResult({
         authMode: config.authMode,
         secretRevealEnabled: config.enableSecretReveal,
+        writesEnabled: config.enableWrites,
+        destructiveActionsEnabled: config.enableDestructiveActions,
+        permissionMutationEnabled: config.enablePermissionMutation,
+        scriptRunnerEnabled: config.enableScriptRunner,
         ...SDK_CAPABILITIES,
       }),
   );
@@ -348,25 +446,20 @@ export function createOnePasswordMcpServer(
           workspaceRoot: z.string().min(1),
           commandId: z.string().min(1),
           reason: z.string().min(3),
+          returnOutput: z.boolean().optional(),
           acknowledgePlaintext: z.string().optional(),
         },
       },
-      async ({ workspaceRoot, commandId, reason, acknowledgePlaintext }) => {
+      async ({ workspaceRoot, commandId, reason, returnOutput, acknowledgePlaintext }) => {
         assertScriptRunnerEnabled(config);
 
         try {
-          const allowlist = await scriptRunner.list(workspaceRoot);
-          const command = allowlist.commands.find(
-            (candidate) => candidate.id === commandId,
-          );
-          if (!command) {
-            throw new Error(`Allowlisted command ${commandId} not found.`);
-          }
-          if (command.sensitiveOutput) {
+          const includeOutput = returnOutput ?? false;
+          if (includeOutput) {
             assertSecretRevealEnabled(config);
             if (acknowledgePlaintext !== SECRET_REVEAL_ACK) {
               throw new Error(
-                `sensitiveOutput=true requires acknowledgePlaintext=${SECRET_REVEAL_ACK}.`,
+                `returnOutput=true requires acknowledgePlaintext=${SECRET_REVEAL_ACK}.`,
               );
             }
           }
@@ -388,25 +481,15 @@ export function createOnePasswordMcpServer(
             timedOut: result.timedOut,
             outputTruncated: result.outputTruncated,
             refreshedAuth: result.refreshedAuth,
-            sensitiveOutput: command.sensitiveOutput,
+            sensitiveOutput: result.sensitiveOutput,
+            outputReturned: includeOutput,
           }, result.errorMessage);
 
           return {
-            ...textResult(commandOutputText(result), {
-              commandId: result.commandId,
-              workspaceRoot: result.workspaceRoot,
-              cwd: result.cwd,
-              authMode: result.authMode,
-              exitCode: result.exitCode,
-              signal: result.signal,
-              timedOut: result.timedOut,
-              outputTruncated: result.outputTruncated,
-              durationMs: result.durationMs,
-              refreshedAuth: result.refreshedAuth,
-              stdout: result.stdout,
-              stderr: result.stderr,
-              errorMessage: result.errorMessage,
-            }),
+            ...textResult(
+              commandOutputText(result, includeOutput),
+              scriptRunStructuredContent(result, includeOutput),
+            ),
             isError: outcome === "error",
           };
         } catch (error) {
@@ -628,8 +711,9 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "password_create",
+  if (config.enableWrites) {
+    server.registerTool(
+      "password_create",
     {
       description:
         "Create a login/password item with either a provided password or a generated one. Returns redacted item metadata only.",
@@ -731,8 +815,8 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "password_update",
+    server.registerTool(
+      "password_update",
     {
       description:
         "Update or insert one concealed password field on an existing item. Returns redacted item metadata only.",
@@ -792,7 +876,8 @@ export function createOnePasswordMcpServer(
         throw error;
       }
     },
-  );
+    );
+  }
 
   server.registerTool(
     "vault_list",
@@ -829,8 +914,9 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "vault_create",
+  if (config.enableWrites) {
+    server.registerTool(
+      "vault_create",
     {
       description: "Create a new vault.",
       inputSchema: {
@@ -855,8 +941,8 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "vault_update",
+    server.registerTool(
+      "vault_update",
     {
       description: "Update a vault title and/or description.",
       inputSchema: {
@@ -877,8 +963,11 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "vault_delete",
+  }
+
+  if (config.enableDestructiveActions) {
+    server.registerTool(
+      "vault_delete",
     {
       description: "Delete a vault by ID.",
       inputSchema: {
@@ -895,7 +984,8 @@ export function createOnePasswordMcpServer(
         throw error;
       }
     },
-  );
+    );
+  }
 
   server.registerTool(
     "group_get",
@@ -933,8 +1023,9 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "vault_permissions_grant_group",
+  if (config.enablePermissionMutation) {
+    server.registerTool(
+      "vault_permissions_grant_group",
     {
       description: "Grant group permissions on a vault.",
       inputSchema: {
@@ -977,8 +1068,8 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "vault_permissions_update_group",
+    server.registerTool(
+      "vault_permissions_update_group",
     {
       description: "Replace a group's permissions on a vault.",
       inputSchema: {
@@ -1022,8 +1113,8 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "vault_permissions_revoke_group",
+    server.registerTool(
+      "vault_permissions_revoke_group",
     {
       description: "Revoke all group permissions from a vault.",
       inputSchema: {
@@ -1054,7 +1145,8 @@ export function createOnePasswordMcpServer(
         throw error;
       }
     },
-  );
+    );
+  }
 
   server.registerTool(
     "item_search",
@@ -1110,8 +1202,9 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "item_create",
+  if (config.enableWrites) {
+    server.registerTool(
+      "item_create",
     {
       description: "Create an item in a vault.",
       inputSchema: {
@@ -1158,8 +1251,8 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "item_update",
+    server.registerTool(
+      "item_update",
     {
       description:
         "Update an item. Provided arrays replace the existing arrays on the item.",
@@ -1203,8 +1296,11 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "item_archive",
+  }
+
+  if (config.enableDestructiveActions) {
+    server.registerTool(
+      "item_archive",
     {
       description: "Archive an item.",
       inputSchema: {
@@ -1230,8 +1326,8 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
-    "item_delete",
+    server.registerTool(
+      "item_delete",
     {
       description: "Delete an item.",
       inputSchema: {
@@ -1255,7 +1351,8 @@ export function createOnePasswordMcpServer(
         throw error;
       }
     },
-  );
+    );
+  }
 
   server.registerTool(
     "environment_get_variables",

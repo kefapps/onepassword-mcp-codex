@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 
 export type AuthMode = "desktop" | "service-account";
@@ -11,7 +11,11 @@ export interface ServerConfig {
   account?: string;
   serviceAccountToken?: string;
   enableSecretReveal: boolean;
+  enableWrites: boolean;
+  enableDestructiveActions: boolean;
+  enablePermissionMutation: boolean;
   enableScriptRunner: boolean;
+  scriptRunnerRoots: string[];
   opCliPath: string;
   opCliAuthMode: OpCliAuthMode;
   auditLogPath: string;
@@ -41,6 +45,25 @@ function readFlagValue(args: string[], name: string): string | undefined {
   }
 
   return undefined;
+}
+
+function readFlagValues(args: string[], name: string): string[] {
+  const values: string[] = [];
+  const prefix = `--${name}=`;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg.startsWith(prefix)) {
+      values.push(arg.slice(prefix.length));
+      continue;
+    }
+    if (arg === `--${name}` && args[index + 1]) {
+      values.push(args[index + 1]!);
+      index += 1;
+    }
+  }
+
+  return values;
 }
 
 function hasFlag(args: string[], name: string): boolean {
@@ -99,6 +122,17 @@ function parseOpCliAuthMode(value: string | undefined): OpCliAuthMode {
   throw new Error(`Unsupported op CLI auth mode: ${value}`);
 }
 
+function parsePathList(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 export function parseConfig(argv: string[], packageVersion: string): ServerConfig {
   if (argv.includes("-h") || hasFlag(argv, "help")) {
     throw new HelpError(
@@ -110,7 +144,11 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --account=<1password account name or UUID>",
         "  --service-account-token=<token>",
         "  --enable-secret-reveal=true|false",
+        "  --enable-writes=true|false",
+        "  --enable-destructive-actions=true|false",
+        "  --enable-permission-mutation=true|false",
         "  --enable-script-runner=true|false",
+        "  --script-runner-root=<absolute trusted root> (repeatable)",
         "  --op-cli-path=<path>",
         "  --op-cli-auth-mode=auto|desktop|manual-session|service-account",
         "  --audit-log-path=<path>",
@@ -150,28 +188,71 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
       process.env.OP_MCP_ENABLE_SECRET_REVEAL,
     false,
   );
+  const enableWrites = parseBoolean(
+    readFlagValue(argv, "enable-writes") ?? process.env.OP_MCP_ENABLE_WRITES,
+    false,
+  );
+  const enableDestructiveActions = parseBoolean(
+    readFlagValue(argv, "enable-destructive-actions") ??
+      process.env.OP_MCP_ENABLE_DESTRUCTIVE_ACTIONS,
+    false,
+  );
+  const enablePermissionMutation = parseBoolean(
+    readFlagValue(argv, "enable-permission-mutation") ??
+      process.env.OP_MCP_ENABLE_PERMISSION_MUTATION,
+    false,
+  );
   const enableScriptRunner = parseBoolean(
     readFlagValue(argv, "enable-script-runner") ??
       process.env.OP_MCP_ENABLE_SCRIPT_RUNNER,
     false,
   );
+  const scriptRunnerRoots = [
+    ...readFlagValues(argv, "script-runner-root"),
+    ...parsePathList(
+      readFlagValue(argv, "script-runner-roots") ??
+        process.env.OP_MCP_SCRIPT_RUNNER_ROOTS,
+    ),
+  ];
   const opCliPath = readFlagValue(argv, "op-cli-path") ?? process.env.OP_MCP_OP_CLI_PATH ?? "op";
   const opCliAuthMode = parseOpCliAuthMode(
     readFlagValue(argv, "op-cli-auth-mode") ?? process.env.OP_MCP_OP_CLI_AUTH_MODE,
   );
 
+  if (enableScriptRunner) {
+    if (scriptRunnerRoots.length === 0) {
+      throw new Error(
+        "Script runner requires at least one --script-runner-root absolute trusted root.",
+      );
+    }
+    for (const root of scriptRunnerRoots) {
+      if (!isAbsolute(root)) {
+        throw new Error(`Script runner root must be absolute: ${root}`);
+      }
+    }
+    if (!isAbsolute(opCliPath)) {
+      throw new Error(
+        "Script runner requires --op-cli-path to be an absolute path.",
+      );
+    }
+  }
+
   const auditLogPath =
     readFlagValue(argv, "audit-log-path") ??
     process.env.OP_MCP_AUDIT_LOG_PATH ??
     DEFAULT_AUDIT_LOG_PATH;
-  mkdirSync(dirname(auditLogPath), { recursive: true });
+  mkdirSync(dirname(auditLogPath), { recursive: true, mode: 0o700 });
 
   return {
     authMode,
     account,
     serviceAccountToken,
     enableSecretReveal,
+    enableWrites,
+    enableDestructiveActions,
+    enablePermissionMutation,
     enableScriptRunner,
+    scriptRunnerRoots,
     opCliPath,
     opCliAuthMode,
     auditLogPath,

@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { constants, openSync, writeSync } from "node:fs";
 
 export interface AuditEvent {
   action: string;
@@ -12,7 +12,16 @@ export interface AuditLogger {
 }
 
 export class FileAuditLogger implements AuditLogger {
-  public constructor(private readonly logPath: string) {}
+  private readonly fileDescriptor: number;
+
+  public constructor(private readonly logPath: string) {
+    const noFollow = constants.O_NOFOLLOW ?? 0;
+    this.fileDescriptor = openSync(
+      this.logPath,
+      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollow,
+      0o600,
+    );
+  }
 
   public record(event: AuditEvent): void {
     const line = JSON.stringify({
@@ -20,7 +29,7 @@ export class FileAuditLogger implements AuditLogger {
       pid: process.pid,
       ...event,
     });
-    appendFileSync(this.logPath, `${line}\n`, "utf8");
+    writeSync(this.fileDescriptor, `${line}\n`, undefined, "utf8");
   }
 }
 

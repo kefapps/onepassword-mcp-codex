@@ -71,6 +71,7 @@ export interface OpScriptRunResult extends ProcessRunResult {
   cwd: string;
   command: string;
   args: string[];
+  sensitiveOutput: boolean;
   authMode: ResolvedOpCliAuthMode;
   refreshedAuth: boolean;
 }
@@ -95,6 +96,17 @@ const allowlistSchema = z.object({
   version: z.literal(1),
   commands: z.record(commandSchema),
 });
+
+const BASE_CHILD_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+] as const;
 
 function isPathInside(parentPath: string, childPath: string): boolean {
   const pathRelative = relative(parentPath, childPath);
@@ -152,7 +164,7 @@ function appendOutput(
 
 function resolveAuthMode(config: ServerConfig): ResolvedOpCliAuthMode {
   if (config.opCliAuthMode === "auto") {
-    return config.serviceAccountToken ? "service-account" : "manual-session";
+    return config.authMode === "service-account" ? "service-account" : "manual-session";
   }
 
   return config.opCliAuthMode;
@@ -173,16 +185,16 @@ function createChildEnvironment(
   authMode: ResolvedOpCliAuthMode,
   env: Record<string, string>,
 ): NodeJS.ProcessEnv {
-  const childEnv: NodeJS.ProcessEnv = { ...process.env };
-  delete childEnv.OP_SESSION;
-  delete childEnv.OP_SERVICE_ACCOUNT_TOKEN;
-
-  if (authMode !== "manual-session") {
-    Object.keys(childEnv)
-      .filter((key) => key.startsWith("OP_SESSION_"))
-      .forEach((key) => {
-        delete childEnv[key];
-      });
+  const childEnv: NodeJS.ProcessEnv = {};
+  for (const key of BASE_CHILD_ENV_KEYS) {
+    if (process.env[key]) {
+      childEnv[key] = process.env[key];
+    }
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if ((key === "LANG" || key.startsWith("LC_")) && value) {
+      childEnv[key] = value;
+    }
   }
 
   return {
@@ -421,7 +433,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
   }
 
   public async list(workspaceRoot: string): Promise<ScriptAllowlist> {
-    return loadScriptAllowlist(workspaceRoot);
+    return loadScriptAllowlist(workspaceRoot, this.config.scriptRunnerRoots);
   }
 
   public async run(
@@ -458,6 +470,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
         cwd,
         command: command.command,
         args: command.args,
+        sensitiveOutput: command.sensitiveOutput,
         authMode: auth.mode,
         refreshedAuth: false,
       };
@@ -477,8 +490,24 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
   }
 }
 
-export async function loadScriptAllowlist(workspaceRoot: string): Promise<ScriptAllowlist> {
+export async function loadScriptAllowlist(
+  workspaceRoot: string,
+  allowedRoots: string[] = [],
+): Promise<ScriptAllowlist> {
   const resolvedWorkspaceRoot = await realpath(workspaceRoot);
+  if (allowedRoots.length > 0) {
+    const resolvedAllowedRoots = await Promise.all(
+      allowedRoots.map((root) => realpath(root)),
+    );
+    const withinAllowedRoot = resolvedAllowedRoots.some((root) =>
+      isPathInside(root, resolvedWorkspaceRoot),
+    );
+    if (!withinAllowedRoot) {
+      throw new Error(
+        `Workspace ${resolvedWorkspaceRoot} is outside the configured script runner roots.`,
+      );
+    }
+  }
   const allowlistPath = join(resolvedWorkspaceRoot, SCRIPT_ALLOWLIST_FILENAME);
   const raw = await readFile(allowlistPath, "utf8");
   const parsed = allowlistSchema.parse(JSON.parse(raw));

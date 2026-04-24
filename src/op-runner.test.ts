@@ -20,7 +20,11 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     authMode: "desktop",
     account: "TestAccount",
     enableSecretReveal: false,
+    enableWrites: false,
+    enableDestructiveActions: false,
+    enablePermissionMutation: false,
     enableScriptRunner: true,
+    scriptRunnerRoots: [],
     opCliPath: "op",
     opCliAuthMode: "auto",
     auditLogPath: "/tmp/onepassword-mcp-codex-test-audit.jsonl",
@@ -100,7 +104,7 @@ test("loadScriptAllowlist parses command defaults", async () => {
     },
   });
 
-  const allowlist = await loadScriptAllowlist(workspace);
+  const allowlist = await loadScriptAllowlist(workspace, [workspace]);
 
   assert.equal(allowlist.commands[0]?.id, "deploy");
   assert.equal(allowlist.commands[0]?.cwd, ".");
@@ -147,6 +151,27 @@ test("DefaultOpScriptRunner rejects relative command paths", async () => {
   );
 });
 
+test("DefaultOpScriptRunner rejects workspace outside configured roots", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: "npm",
+      },
+    },
+  });
+  const trustedRoot = await mkdtemp(join(tmpdir(), "op-runner-trusted-"));
+  const processRunner = new FakeProcessRunner([]);
+  const config = createConfig({ scriptRunnerRoots: [trustedRoot] });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  await assert.rejects(
+    () => runner.run(workspace, "deploy"),
+    /outside the configured script runner roots/,
+  );
+});
+
 test("manual-session auth caches OP_SESSION and refreshes after auth failure", async () => {
   const workspace = await createWorkspace({
     version: 1,
@@ -166,7 +191,10 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
     processResult({ stdout: "session-token-2\n" }),
     processResult({ stdout: "ok session-token-2\n" }),
   ]);
-  const config = createConfig({ opCliAuthMode: "manual-session" });
+  const config = createConfig({
+    opCliAuthMode: "manual-session",
+    scriptRunnerRoots: [workspace],
+  });
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
@@ -177,9 +205,11 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
   assert.equal(result.stdout, "ok [REDACTED]\n");
   assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
   assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-2");
+  assert.equal(commandCalls[0]?.env?.OP_SERVICE_ACCOUNT_TOKEN, undefined);
 });
 
-test("service-account auth injects OP_SERVICE_ACCOUNT_TOKEN without OP_SESSION", async () => {
+test("service-account auth injects OP_SERVICE_ACCOUNT_TOKEN into a minimal env", async () => {
+  process.env.OP_MCP_TEST_SECRET = "must-not-leak";
   const processRunner = new FakeProcessRunner([]);
   const config = createConfig({
     authMode: "service-account",
@@ -193,6 +223,8 @@ test("service-account auth injects OP_SERVICE_ACCOUNT_TOKEN without OP_SESSION",
   assert.equal(auth.mode, "service-account");
   assert.equal(auth.env.OP_SERVICE_ACCOUNT_TOKEN, "service-token");
   assert.equal(auth.env.OP_SESSION, undefined);
+  assert.equal(auth.env.OP_MCP_TEST_SECRET, undefined);
+  delete process.env.OP_MCP_TEST_SECRET;
 });
 
 test("NodeProcessRunner times out long-running commands", async () => {
