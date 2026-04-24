@@ -15,6 +15,8 @@ import {
   type ProcessRunner,
 } from "./op-runner.js";
 
+const TEST_COMMAND = process.execPath;
+
 function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   return {
     authMode: "desktop",
@@ -114,7 +116,7 @@ test("loadConfiguredScriptAllowlists parses command defaults", async () => {
     version: 1,
     commands: {
       deploy: {
-        command: "npm",
+        command: TEST_COMMAND,
         args: ["run", "deploy"],
       },
     },
@@ -135,7 +137,7 @@ test("DefaultOpScriptRunner rejects cwd outside workspace", async () => {
     version: 1,
     commands: {
       escape: {
-        command: "npm",
+        command: TEST_COMMAND,
         cwd: "..",
       },
     },
@@ -167,7 +169,7 @@ test("DefaultOpScriptRunner rejects relative command paths", async () => {
 
   await assert.rejects(
     () => runner.run(workspace, "relative"),
-    /PATH executable name or an absolute path inside the workspace/,
+    /absolute executable path/,
   );
 });
 
@@ -176,7 +178,7 @@ test("DefaultOpScriptRunner rejects workspace outside configured roots", async (
     version: 1,
     commands: {
       deploy: {
-        command: "npm",
+        command: TEST_COMMAND,
       },
     },
   });
@@ -203,7 +205,7 @@ test("DefaultOpScriptRunner uses startup-pinned allowlists", async () => {
     version: 1,
     commands: {
       deploy: {
-        command: "npm",
+        command: TEST_COMMAND,
       },
     },
   });
@@ -218,7 +220,7 @@ test("DefaultOpScriptRunner uses startup-pinned allowlists", async () => {
       version: 1,
       commands: {
         injected: {
-          command: "npm",
+          command: TEST_COMMAND,
         },
       },
     }),
@@ -233,7 +235,7 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
     version: 1,
     commands: {
       deploy: {
-        command: "npm",
+        command: TEST_COMMAND,
         args: ["run", "deploy"],
       },
     },
@@ -259,7 +261,9 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
   const result = await runner.run(workspace, "deploy");
-  const commandCalls = processRunner.calls.filter((call) => call.command === "npm");
+  const commandCalls = processRunner.calls.filter(
+    (call) => call.command === TEST_COMMAND,
+  );
 
   assert.equal(result.refreshedAuth, true);
   assert.equal(result.stdout, "ok [REDACTED]\n");
@@ -273,7 +277,7 @@ test("manual-session auth does not refresh when deterministic auth check passes"
     version: 1,
     commands: {
       deploy: {
-        command: "npm",
+        command: TEST_COMMAND,
         args: ["run", "deploy"],
       },
     },
@@ -293,10 +297,48 @@ test("manual-session auth does not refresh when deterministic auth check passes"
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
   const result = await runner.run(workspace, "deploy");
-  const commandCalls = processRunner.calls.filter((call) => call.command === "npm");
+  const commandCalls = processRunner.calls.filter(
+    (call) => call.command === TEST_COMMAND,
+  );
 
   assert.equal(result.refreshedAuth, false);
   assert.equal(result.stderr, "remote API says run op signin before deployment");
+  assert.equal(commandCalls.length, 1);
+});
+
+test("manual-session auth does not refresh after non-auth whoami failures", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "session-token-1\n" }),
+    processResult({
+      stderr: "script failed after partial side effects",
+      exitCode: 1,
+    }),
+    processResult({
+      stderr: "op whoami failed: network timeout",
+      exitCode: 1,
+    }),
+  ]);
+  const config = createScriptRunnerConfig(workspace, {
+    opCliAuthMode: "manual-session",
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.run(workspace, "deploy");
+  const commandCalls = processRunner.calls.filter(
+    (call) => call.command === TEST_COMMAND,
+  );
+
+  assert.equal(result.refreshedAuth, false);
   assert.equal(commandCalls.length, 1);
 });
 
@@ -305,7 +347,7 @@ test("service-account auth does not rerun scripts after auth-looking failures", 
     version: 1,
     commands: {
       deploy: {
-        command: "npm",
+        command: TEST_COMMAND,
         args: ["run", "deploy"],
       },
     },
@@ -326,7 +368,9 @@ test("service-account auth does not rerun scripts after auth-looking failures", 
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
   const result = await runner.run(workspace, "deploy");
-  const commandCalls = processRunner.calls.filter((call) => call.command === "npm");
+  const commandCalls = processRunner.calls.filter(
+    (call) => call.command === TEST_COMMAND,
+  );
 
   assert.equal(result.refreshedAuth, false);
   assert.equal(commandCalls.length, 1);

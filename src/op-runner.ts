@@ -120,10 +120,6 @@ function isPathInside(parentPath: string, childPath: string): boolean {
   );
 }
 
-function hasPathSeparator(value: string): boolean {
-  return value.includes("/") || value.includes("\\");
-}
-
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -170,6 +166,26 @@ function resolveAuthMode(config: ServerConfig): ResolvedOpCliAuthMode {
   }
 
   return config.opCliAuthMode;
+}
+
+function isDeterministicOpAuthFailure(result: ProcessRunResult): boolean {
+  if (result.exitCode === 0) {
+    return false;
+  }
+
+  const output = `${result.stdout}\n${result.stderr}\n${result.errorMessage ?? ""}`;
+  return output
+    .split(/\r?\n/)
+    .some((line) =>
+      [
+        /\bnot (?:currently )?signed in\b/i,
+        /\brun [`'"]?op signin\b/i,
+        /\bOP_SESSION(?:_[A-Z0-9_]+)?\b.*\b(?:expired|invalid)\b/i,
+        /\b(?:expired|invalid)\b.*\bOP_SESSION(?:_[A-Z0-9_]+)?\b/i,
+        /\bsession\b.*\b(?:expired|invalid)\b/i,
+        /\b(?:expired|invalid)\b.*\bsession\b/i,
+      ].some((pattern) => pattern.test(line)),
+    );
 }
 
 function forceKillGraceMs(timeoutMs: number): number {
@@ -376,12 +392,12 @@ export class OpCliSessionManager {
     };
   }
 
-  public async isCurrentManualSessionValid(): Promise<boolean> {
+  public async isCurrentManualSessionInvalid(): Promise<boolean> {
     if (this.resolvedAuthMode !== "manual-session") {
-      return true;
+      return false;
     }
     if (!this.config.account || !this.cachedSessionToken) {
-      return false;
+      return true;
     }
 
     const result = await this.processRunner.run(
@@ -397,7 +413,7 @@ export class OpCliSessionManager {
       },
     );
 
-    return result.exitCode === 0;
+    return isDeterministicOpAuthFailure(result);
   }
 
   private async ensureDesktopValidated(): Promise<void> {
@@ -501,7 +517,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     }
 
     const cwd = await resolveWorkspacePath(allowlist.workspaceRoot, command.cwd);
-    await validateCommandExecutable(command.command, allowlist.workspaceRoot);
+    await validateCommandExecutable(command.command);
 
     const runOnce = async (): Promise<OpScriptRunResult> => {
       const auth = await this.sessionManager.getEnvironment();
@@ -535,7 +551,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
       firstResult.exitCode === 0 ||
       firstResult.timedOut ||
       firstResult.authMode !== "manual-session" ||
-      (await this.sessionManager.isCurrentManualSessionValid())
+      !(await this.sessionManager.isCurrentManualSessionInvalid())
     ) {
       return firstResult;
     }
@@ -619,28 +635,12 @@ async function resolveWorkspacePath(
   return resolved;
 }
 
-async function validateCommandExecutable(
-  command: string,
-  workspaceRoot: string,
-): Promise<void> {
-  if (!hasPathSeparator(command)) {
-    return;
-  }
-
+async function validateCommandExecutable(command: string): Promise<void> {
   if (!isAbsolute(command)) {
     throw new Error(
-      "Allowlisted command must be a PATH executable name or an absolute path inside the workspace.",
+      "Allowlisted command must be an absolute executable path.",
     );
   }
 
-  const commandPath = await realpath(command);
-  if (!isPathInside(workspaceRoot, commandPath)) {
-    throw new Error(`Command ${command} resolves outside workspace ${workspaceRoot}.`);
-  }
-
-  await access(commandPath, constants.X_OK);
-  const commandDirectory = await realpath(dirname(commandPath));
-  if (!isPathInside(workspaceRoot, commandDirectory)) {
-    throw new Error(`Command ${command} resolves outside workspace ${workspaceRoot}.`);
-  }
+  await access(await realpath(command), constants.X_OK);
 }

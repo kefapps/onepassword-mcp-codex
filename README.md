@@ -196,7 +196,7 @@ For scripts that need the 1Password CLI, add an allowlist and pass its absolute 
   "commands": {
     "deploy": {
       "description": "Deploy with 1Password CLI access",
-      "command": "npm",
+      "command": "/absolute/path/to/npm",
       "args": ["run", "deploy"],
       "cwd": ".",
       "timeoutMs": 600000,
@@ -215,6 +215,7 @@ Runner constraints:
 - Allowlists are parsed and pinned when the MCP server starts; edits made later by the MCP client do not authorize new commands.
 - If `--script-runner-root` is configured, each allowlist workspace root must resolve below one of those roots.
 - Commands must be declared in a startup-configured allowlist; no free-form shell is exposed.
+- Command paths must be absolute executable paths; `PATH` lookup is not used for allowlisted commands.
 - `cwd` is resolved inside the workspace root.
 - The command is spawned with `shell: false`.
 - Child processes receive a minimal environment plus the selected 1Password auth variables.
