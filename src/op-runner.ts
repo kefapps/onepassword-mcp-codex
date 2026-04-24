@@ -142,25 +142,25 @@ function redactAuthText(text: string, sessionToken?: string, serviceToken?: stri
 
 function appendOutput(
   chunks: Buffer[],
-  state: { length: number; truncated: boolean },
+  sharedState: { length: number; truncated: boolean },
   data: Buffer,
   maxBytes: number,
 ): void {
-  if (state.length >= maxBytes) {
-    state.truncated = true;
+  if (sharedState.length >= maxBytes) {
+    sharedState.truncated = true;
     return;
   }
 
-  const remaining = maxBytes - state.length;
+  const remaining = maxBytes - sharedState.length;
   if (data.length > remaining) {
     chunks.push(data.subarray(0, remaining));
-    state.length += remaining;
-    state.truncated = true;
+    sharedState.length += remaining;
+    sharedState.truncated = true;
     return;
   }
 
   chunks.push(data);
-  state.length += data.length;
+  sharedState.length += data.length;
 }
 
 function resolveAuthMode(config: ServerConfig): ResolvedOpCliAuthMode {
@@ -241,8 +241,7 @@ export class NodeProcessRunner implements ProcessRunner {
       let forceSettleTimeout: NodeJS.Timeout | undefined;
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
-      const stdoutState = { length: 0, truncated: false };
-      const stderrState = { length: 0, truncated: false };
+      const outputState = { length: 0, truncated: false };
       const child = spawn(command, args, {
         cwd: options.cwd,
         env: options.env,
@@ -284,8 +283,7 @@ export class NodeProcessRunner implements ProcessRunner {
         if (forceSettleTimeout) {
           clearTimeout(forceSettleTimeout);
         }
-        outputTruncated =
-          outputTruncated || stdoutState.truncated || stderrState.truncated;
+        outputTruncated = outputTruncated || outputState.truncated;
         resolveResult({
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: Buffer.concat(stderrChunks).toString("utf8"),
@@ -299,10 +297,10 @@ export class NodeProcessRunner implements ProcessRunner {
       };
 
       child.stdout?.on("data", (data: Buffer) => {
-        appendOutput(stdoutChunks, stdoutState, data, options.maxOutputBytes);
+        appendOutput(stdoutChunks, outputState, data, options.maxOutputBytes);
       });
       child.stderr?.on("data", (data: Buffer) => {
-        appendOutput(stderrChunks, stderrState, data, options.maxOutputBytes);
+        appendOutput(stderrChunks, outputState, data, options.maxOutputBytes);
       });
       child.once("error", (error) => {
         settle({

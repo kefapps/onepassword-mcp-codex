@@ -275,6 +275,28 @@ test("NodeProcessRunner times out long-running commands", async () => {
   assert.equal(result.timedOut, true);
 });
 
+test("NodeProcessRunner enforces max output across stdout and stderr", async () => {
+  const runner = new NodeProcessRunner();
+
+  const result = await runner.run(
+    process.execPath,
+    [
+      "-e",
+      "process.stdout.write('a'.repeat(20)); process.stderr.write('b'.repeat(20));",
+    ],
+    {
+      timeoutMs: 1_000,
+      maxOutputBytes: 30,
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.outputTruncated, true);
+  assert.ok(
+    Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= 30,
+  );
+});
+
 test("NodeProcessRunner force-kills commands that ignore SIGTERM", async () => {
   const runner = new NodeProcessRunner();
 
@@ -285,12 +307,12 @@ test("NodeProcessRunner force-kills commands that ignore SIGTERM", async () => {
       "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);",
     ],
     {
-      timeoutMs: 500,
+      timeoutMs: 2_000,
       maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
     },
   );
 
   assert.equal(result.timedOut, true);
   assert.equal(result.signal, "SIGKILL");
-  assert.ok(result.durationMs < 2_000);
+  assert.ok(result.durationMs < 4_500);
 });

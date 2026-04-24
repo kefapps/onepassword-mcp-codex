@@ -122,6 +122,17 @@ function parseOpCliAuthMode(value: string | undefined): OpCliAuthMode {
   throw new Error(`Unsupported op CLI auth mode: ${value}`);
 }
 
+function resolveScriptRunnerAuthMode(
+  authMode: AuthMode,
+  opCliAuthMode: OpCliAuthMode,
+): Exclude<OpCliAuthMode, "auto"> {
+  if (opCliAuthMode === "auto") {
+    return authMode === "service-account" ? "service-account" : "manual-session";
+  }
+
+  return opCliAuthMode;
+}
+
 function parsePathList(value: string | undefined): string[] {
   if (!value) {
     return [];
@@ -233,6 +244,21 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     if (!isAbsolute(opCliPath)) {
       throw new Error(
         "Script runner requires --op-cli-path to be an absolute path.",
+      );
+    }
+    const scriptRunnerAuthMode = resolveScriptRunnerAuthMode(authMode, opCliAuthMode);
+    if (
+      (scriptRunnerAuthMode === "desktop" ||
+        scriptRunnerAuthMode === "manual-session") &&
+      !account
+    ) {
+      throw new Error(
+        "Script runner op CLI auth requires --account or OP_MCP_ACCOUNT for desktop/manual-session mode.",
+      );
+    }
+    if (scriptRunnerAuthMode === "service-account" && !serviceAccountToken) {
+      throw new Error(
+        "Script runner op CLI service-account mode requires --service-account-token or OP_SERVICE_ACCOUNT_TOKEN.",
       );
     }
   }
