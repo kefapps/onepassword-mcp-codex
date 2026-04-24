@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants, readFileSync, realpathSync } from "node:fs";
-import { access, readFile, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { access, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { ServerConfig } from "./config.js";
 
@@ -606,24 +606,6 @@ export function loadConfiguredScriptAllowlists(
 
     return scriptAllowlistFromParsed(resolvedAllowlistPath, workspaceRoot, parsed);
   });
-}
-
-export async function loadScriptAllowlist(
-  workspaceRoot: string,
-  allowedRoots: string[] = [],
-): Promise<ScriptAllowlist> {
-  const resolvedWorkspaceRoot = await realpath(workspaceRoot);
-  if (allowedRoots.length > 0) {
-    const resolvedAllowedRoots = await Promise.all(
-      allowedRoots.map((root) => realpath(root)),
-    );
-    assertWorkspaceRootAllowed(resolvedWorkspaceRoot, resolvedAllowedRoots);
-  }
-  const allowlistPath = join(resolvedWorkspaceRoot, SCRIPT_ALLOWLIST_FILENAME);
-  const raw = await readFile(allowlistPath, "utf8");
-  const parsed = allowlistSchema.parse(JSON.parse(raw));
-
-  return scriptAllowlistFromParsed(allowlistPath, resolvedWorkspaceRoot, parsed);
 }
 
 async function resolveWorkspacePath(

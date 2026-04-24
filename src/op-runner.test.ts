@@ -10,7 +10,7 @@ import {
   NodeProcessRunner,
   OpCliSessionManager,
   SCRIPT_ALLOWLIST_FILENAME,
-  loadScriptAllowlist,
+  loadConfiguredScriptAllowlists,
   type ProcessRunResult,
   type ProcessRunner,
 } from "./op-runner.js";
@@ -109,7 +109,7 @@ function processResult(overrides: Partial<ProcessRunResult> = {}): ProcessRunRes
   };
 }
 
-test("loadScriptAllowlist parses command defaults", async () => {
+test("loadConfiguredScriptAllowlists parses command defaults", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -120,7 +120,9 @@ test("loadScriptAllowlist parses command defaults", async () => {
     },
   });
 
-  const allowlist = await loadScriptAllowlist(workspace, [workspace]);
+  const allowlist = loadConfiguredScriptAllowlists(
+    createScriptRunnerConfig(workspace),
+  )[0]!;
 
   assert.equal(allowlist.commands[0]?.id, "deploy");
   assert.equal(allowlist.commands[0]?.cwd, ".");
