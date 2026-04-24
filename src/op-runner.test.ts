@@ -185,7 +185,8 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
   const processRunner = new FakeProcessRunner([
     processResult({ stdout: "session-token-1\n" }),
     processResult({
-      stderr: "session expired",
+      stderr:
+        "You are not currently signed in to your 1Password account. Run `op signin`.",
       exitCode: 1,
     }),
     processResult({ stdout: "session-token-2\n" }),
@@ -206,6 +207,38 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
   assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
   assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-2");
   assert.equal(commandCalls[0]?.env?.OP_SERVICE_ACCOUNT_TOKEN, undefined);
+});
+
+test("manual-session auth does not refresh for generic app auth failures", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: "npm",
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "session-token-1\n" }),
+    processResult({
+      stderr: "remote API unauthorized: authentication failed",
+      exitCode: 1,
+    }),
+  ]);
+  const config = createConfig({
+    opCliAuthMode: "manual-session",
+    scriptRunnerRoots: [workspace],
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.run(workspace, "deploy");
+  const commandCalls = processRunner.calls.filter((call) => call.command === "npm");
+
+  assert.equal(result.refreshedAuth, false);
+  assert.equal(result.stderr, "remote API unauthorized: authentication failed");
+  assert.equal(commandCalls.length, 1);
 });
 
 test("service-account auth injects OP_SERVICE_ACCOUNT_TOKEN into a minimal env", async () => {
@@ -240,4 +273,24 @@ test("NodeProcessRunner times out long-running commands", async () => {
   );
 
   assert.equal(result.timedOut, true);
+});
+
+test("NodeProcessRunner force-kills commands that ignore SIGTERM", async () => {
+  const runner = new NodeProcessRunner();
+
+  const result = await runner.run(
+    process.execPath,
+    [
+      "-e",
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);",
+    ],
+    {
+      timeoutMs: 500,
+      maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+    },
+  );
+
+  assert.equal(result.timedOut, true);
+  assert.equal(result.signal, "SIGKILL");
+  assert.ok(result.durationMs < 2_000);
 });

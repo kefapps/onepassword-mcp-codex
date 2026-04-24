@@ -9,6 +9,7 @@ export const SCRIPT_ALLOWLIST_FILENAME = ".onepassword-mcp-codex.json";
 export const DEFAULT_SCRIPT_TIMEOUT_MS = 600_000;
 export const DEFAULT_PROCESS_TIMEOUT_MS = 30_000;
 export const DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024;
+const FORCE_KILL_GRACE_MS = 1_000;
 
 export type ResolvedOpCliAuthMode =
   | "desktop"
@@ -176,9 +177,25 @@ function isAuthenticationFailure(result: ProcessRunResult): boolean {
   }
 
   const output = `${result.stdout}\n${result.stderr}\n${result.errorMessage ?? ""}`;
-  return /not signed in|sign in|session.*expired|authentication|unauthorized|unauthenticated|invalid session/i.test(
-    output,
-  );
+  return output
+    .split(/\r?\n/)
+    .some((line) =>
+      [
+        /\b(?:op|1password)\b.*\bnot (?:currently )?signed in\b/i,
+        /\bnot (?:currently )?signed in\b.*\b(?:op|1password)\b/i,
+        /\b(?:op|1password)\b.*\bsign in\b/i,
+        /\bsign in\b.*\b(?:op|1password)\b/i,
+        /\brun [`'"]?op signin\b/i,
+        /\bOP_SESSION(?:_[A-Z0-9_]+)?\b.*\b(?:expired|invalid)\b/i,
+        /\b(?:expired|invalid)\b.*\bOP_SESSION(?:_[A-Z0-9_]+)?\b/i,
+        /\b(?:op|1password)\b.*\bsession\b.*\b(?:expired|invalid)\b/i,
+        /\bsession\b.*\b(?:expired|invalid)\b.*\b(?:op|1password)\b/i,
+      ].some((pattern) => pattern.test(line)),
+    );
+}
+
+function forceKillGraceMs(timeoutMs: number): number {
+  return Math.min(FORCE_KILL_GRACE_MS, Math.max(50, Math.floor(timeoutMs / 2)));
 }
 
 function createChildEnvironment(
@@ -220,6 +237,8 @@ export class NodeProcessRunner implements ProcessRunner {
       let settled = false;
       let timedOut = false;
       let outputTruncated = false;
+      let forceKillTimeout: NodeJS.Timeout | undefined;
+      let forceSettleTimeout: NodeJS.Timeout | undefined;
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       const stdoutState = { length: 0, truncated: false };
@@ -234,6 +253,19 @@ export class NodeProcessRunner implements ProcessRunner {
       const timeout = setTimeout(() => {
         timedOut = true;
         child.kill("SIGTERM");
+        forceKillTimeout = setTimeout(() => {
+          if (settled) {
+            return;
+          }
+          child.kill("SIGKILL");
+          forceSettleTimeout = setTimeout(() => {
+            settle({
+              exitCode: null,
+              signal: "SIGKILL",
+              errorMessage: "Process timed out and did not close after SIGKILL.",
+            });
+          }, forceKillGraceMs(options.timeoutMs));
+        }, forceKillGraceMs(options.timeoutMs));
       }, options.timeoutMs);
 
       const settle = (
@@ -246,6 +278,12 @@ export class NodeProcessRunner implements ProcessRunner {
         }
         settled = true;
         clearTimeout(timeout);
+        if (forceKillTimeout) {
+          clearTimeout(forceKillTimeout);
+        }
+        if (forceSettleTimeout) {
+          clearTimeout(forceSettleTimeout);
+        }
         outputTruncated =
           outputTruncated || stdoutState.truncated || stderrState.truncated;
         resolveResult({
