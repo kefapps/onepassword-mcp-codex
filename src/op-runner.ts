@@ -56,6 +56,12 @@ export interface ProcessRunner {
   ): Promise<ProcessRunResult>;
 }
 
+interface OpCliEnvironment {
+  mode: ResolvedOpCliAuthMode;
+  env: NodeJS.ProcessEnv;
+  refreshedAuth: boolean;
+}
+
 export interface OpSessionStatus {
   enabled: boolean;
   authMode: ResolvedOpCliAuthMode;
@@ -348,10 +354,7 @@ export class OpCliSessionManager {
     );
   }
 
-  public async getEnvironment(): Promise<{
-    mode: ResolvedOpCliAuthMode;
-    env: NodeJS.ProcessEnv;
-  }> {
+  public async getEnvironment(): Promise<OpCliEnvironment> {
     const mode = this.resolvedAuthMode;
 
     if (mode === "service-account") {
@@ -366,6 +369,7 @@ export class OpCliSessionManager {
           OP_SERVICE_ACCOUNT_TOKEN: this.config.serviceAccountToken,
           ...(this.config.account ? { OP_ACCOUNT: this.config.account } : {}),
         }),
+        refreshedAuth: false,
       };
     }
 
@@ -380,15 +384,18 @@ export class OpCliSessionManager {
         env: createChildEnvironment(mode, {
           OP_ACCOUNT: this.config.account,
         }),
+        refreshedAuth: false,
       };
     }
 
+    const session = await this.ensureManualSessionToken();
     return {
       mode,
       env: createChildEnvironment(mode, {
         OP_ACCOUNT: this.config.account,
-        OP_SESSION: await this.ensureManualSessionToken(),
+        OP_SESSION: session.token,
       }),
+      refreshedAuth: session.refreshedAuth,
     };
   }
 
@@ -442,9 +449,16 @@ export class OpCliSessionManager {
     this.desktopValidated = true;
   }
 
-  private async ensureManualSessionToken(): Promise<string> {
+  private async ensureManualSessionToken(): Promise<{
+    token: string;
+    refreshedAuth: boolean;
+  }> {
+    const hadCachedSession = Boolean(this.cachedSessionToken);
     if (this.cachedSessionToken) {
-      return this.cachedSessionToken;
+      if (!(await this.isCurrentManualSessionInvalid())) {
+        return { token: this.cachedSessionToken, refreshedAuth: false };
+      }
+      this.cachedSessionToken = undefined;
     }
 
     const result = await this.processRunner.run(
@@ -467,7 +481,7 @@ export class OpCliSessionManager {
     }
 
     this.cachedSessionToken = token;
-    return token;
+    return { token, refreshedAuth: hadCachedSession };
   }
 }
 
@@ -519,48 +533,29 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     const cwd = await resolveWorkspacePath(allowlist.workspaceRoot, command.cwd);
     await validateCommandExecutable(command.command);
 
-    const runOnce = async (): Promise<OpScriptRunResult> => {
-      const auth = await this.sessionManager.getEnvironment();
-      const result = await this.processRunner.run(command.command, command.args, {
-        cwd,
-        env: auth.env,
-        timeoutMs: command.timeoutMs,
-        maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
-      });
+    const auth = await this.sessionManager.getEnvironment();
+    const result = await this.processRunner.run(command.command, command.args, {
+      cwd,
+      env: auth.env,
+      timeoutMs: command.timeoutMs,
+      maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+    });
 
-      return {
-        ...result,
-        stdout: this.sessionManager.redact(result.stdout),
-        stderr: this.sessionManager.redact(result.stderr),
-        errorMessage: result.errorMessage
-          ? this.sessionManager.redact(result.errorMessage)
-          : undefined,
-        commandId,
-        workspaceRoot: allowlist.workspaceRoot,
-        cwd,
-        command: command.command,
-        args: command.args,
-        sensitiveOutput: command.sensitiveOutput,
-        authMode: auth.mode,
-        refreshedAuth: false,
-      };
-    };
-
-    const firstResult = await runOnce();
-    if (
-      firstResult.exitCode === 0 ||
-      firstResult.timedOut ||
-      firstResult.authMode !== "manual-session" ||
-      !(await this.sessionManager.isCurrentManualSessionInvalid())
-    ) {
-      return firstResult;
-    }
-
-    this.sessionManager.reset();
-    const refreshedResult = await runOnce();
     return {
-      ...refreshedResult,
-      refreshedAuth: true,
+      ...result,
+      stdout: this.sessionManager.redact(result.stdout),
+      stderr: this.sessionManager.redact(result.stderr),
+      errorMessage: result.errorMessage
+        ? this.sessionManager.redact(result.errorMessage)
+        : undefined,
+      commandId,
+      workspaceRoot: allowlist.workspaceRoot,
+      cwd,
+      command: command.command,
+      args: command.args,
+      sensitiveOutput: command.sensitiveOutput,
+      authMode: auth.mode,
+      refreshedAuth: auth.refreshedAuth,
     };
   }
 }

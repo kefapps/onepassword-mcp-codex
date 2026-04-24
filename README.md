@@ -221,7 +221,7 @@ Runner constraints:
 - Child processes receive a minimal environment plus the selected 1Password auth variables.
 - stdout/stderr are withheld by default. Use `returnOutput=true` only when operationally needed; it requires `--enable-secret-reveal=true` and the standard plaintext acknowledgement.
 - `OP_SESSION` and service account tokens are redacted from command output when output is explicitly returned.
-- In `manual-session` mode, a failed script is retried only after a deterministic `op whoami` check proves the cached session is invalid.
+- In `manual-session` mode, the cached session is checked before launching a script and refreshed only when `op whoami` deterministically reports an invalid session. Failed scripts are not re-executed automatically.
 
 ## Safety model
 

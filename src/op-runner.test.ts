@@ -230,7 +230,7 @@ test("DefaultOpScriptRunner uses startup-pinned allowlists", async () => {
   await assert.rejects(() => runner.run(workspace, "injected"), /not found/);
 });
 
-test("manual-session auth caches OP_SESSION and refreshes after auth failure", async () => {
+test("manual-session auth refreshes expired cached OP_SESSION before running", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -242,11 +242,7 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
   });
   const processRunner = new FakeProcessRunner([
     processResult({ stdout: "session-token-1\n" }),
-    processResult({
-      stderr:
-        "You are not currently signed in to your 1Password account. Run `op signin`.",
-      exitCode: 1,
-    }),
+    processResult({ stdout: "ok session-token-1\n" }),
     processResult({
       stderr: "session expired",
       exitCode: 1,
@@ -260,19 +256,23 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
-  const result = await runner.run(workspace, "deploy");
+  const firstResult = await runner.run(workspace, "deploy");
+  const secondResult = await runner.run(workspace, "deploy");
   const commandCalls = processRunner.calls.filter(
     (call) => call.command === TEST_COMMAND,
   );
 
-  assert.equal(result.refreshedAuth, true);
-  assert.equal(result.stdout, "ok [REDACTED]\n");
+  assert.equal(firstResult.refreshedAuth, false);
+  assert.equal(firstResult.stdout, "ok [REDACTED]\n");
+  assert.equal(secondResult.refreshedAuth, true);
+  assert.equal(secondResult.stdout, "ok [REDACTED]\n");
+  assert.equal(commandCalls.length, 2);
   assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
   assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-2");
   assert.equal(commandCalls[0]?.env?.OP_SERVICE_ACCOUNT_TOKEN, undefined);
 });
 
-test("manual-session auth does not refresh when deterministic auth check passes", async () => {
+test("manual-session auth does not rerun failed scripts with auth-looking output", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -288,7 +288,6 @@ test("manual-session auth does not refresh when deterministic auth check passes"
       stderr: "remote API says run op signin before deployment",
       exitCode: 1,
     }),
-    processResult(),
   ]);
   const config = createScriptRunnerConfig(workspace, {
     opCliAuthMode: "manual-session",
@@ -318,12 +317,13 @@ test("manual-session auth does not refresh after non-auth whoami failures", asyn
   });
   const processRunner = new FakeProcessRunner([
     processResult({ stdout: "session-token-1\n" }),
+    processResult({ stdout: "first run ok\n" }),
     processResult({
-      stderr: "script failed after partial side effects",
+      stderr: "op whoami failed: network timeout",
       exitCode: 1,
     }),
     processResult({
-      stderr: "op whoami failed: network timeout",
+      stderr: "script failed after partial side effects",
       exitCode: 1,
     }),
   ]);
@@ -333,13 +333,17 @@ test("manual-session auth does not refresh after non-auth whoami failures", asyn
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
+  await runner.run(workspace, "deploy");
   const result = await runner.run(workspace, "deploy");
   const commandCalls = processRunner.calls.filter(
     (call) => call.command === TEST_COMMAND,
   );
 
   assert.equal(result.refreshedAuth, false);
-  assert.equal(commandCalls.length, 1);
+  assert.equal(result.stderr, "script failed after partial side effects");
+  assert.equal(commandCalls.length, 2);
+  assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
+  assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-1");
 });
 
 test("service-account auth does not rerun scripts after auth-looking failures", async () => {
