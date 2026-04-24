@@ -306,6 +306,7 @@ async function createClientAndServer(
     enablePermissionMutation: options.enablePermissionMutation ?? false,
     enableScriptRunner: options.enableScriptRunner ?? false,
     scriptRunnerRoots: ["/workspace"],
+    scriptRunnerAllowlistPaths: ["/workspace/.onepassword-mcp-codex.json"],
     opCliPath: "op",
     opCliAuthMode: "auto",
     auditLogPath: "/tmp/onepassword-mcp-codex-test-audit.jsonl",

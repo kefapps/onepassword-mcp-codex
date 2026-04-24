@@ -16,6 +16,7 @@ export interface ServerConfig {
   enablePermissionMutation: boolean;
   enableScriptRunner: boolean;
   scriptRunnerRoots: string[];
+  scriptRunnerAllowlistPaths: string[];
   opCliPath: string;
   opCliAuthMode: OpCliAuthMode;
   auditLogPath: string;
@@ -170,6 +171,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --enable-permission-mutation=true|false",
         "  --enable-script-runner=true|false",
         "  --script-runner-root=<absolute trusted root> (repeatable)",
+        "  --script-runner-allowlist=<absolute allowlist file> (repeatable)",
         "  --op-cli-path=<path>",
         "  --op-cli-auth-mode=auto|desktop|manual-session|service-account",
         "  --audit-log-path=<path>",
@@ -235,20 +237,32 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         process.env.OP_MCP_SCRIPT_RUNNER_ROOTS,
     ),
   ];
+  const scriptRunnerAllowlistPaths = [
+    ...readFlagValues(argv, "script-runner-allowlist"),
+    ...parsePathList(
+      readFlagValue(argv, "script-runner-allowlists") ??
+        process.env.OP_MCP_SCRIPT_RUNNER_ALLOWLISTS,
+    ),
+  ];
   const opCliPath = readFlagValue(argv, "op-cli-path") ?? process.env.OP_MCP_OP_CLI_PATH ?? "op";
   const opCliAuthMode = parseOpCliAuthMode(
     readFlagValue(argv, "op-cli-auth-mode") ?? process.env.OP_MCP_OP_CLI_AUTH_MODE,
   );
 
   if (enableScriptRunner) {
-    if (scriptRunnerRoots.length === 0) {
+    if (scriptRunnerAllowlistPaths.length === 0) {
       throw new Error(
-        "Script runner requires at least one --script-runner-root absolute trusted root.",
+        "Script runner requires at least one --script-runner-allowlist absolute allowlist file.",
       );
     }
     for (const root of scriptRunnerRoots) {
       if (!isAbsolute(root)) {
         throw new Error(`Script runner root must be absolute: ${root}`);
+      }
+    }
+    for (const allowlistPath of scriptRunnerAllowlistPaths) {
+      if (!isAbsolute(allowlistPath)) {
+        throw new Error(`Script runner allowlist path must be absolute: ${allowlistPath}`);
       }
     }
     if (!isAbsolute(opCliPath)) {
@@ -289,6 +303,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     enablePermissionMutation,
     enableScriptRunner,
     scriptRunnerRoots,
+    scriptRunnerAllowlistPaths,
     opCliPath,
     opCliAuthMode,
     auditLogPath,

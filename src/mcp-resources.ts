@@ -39,6 +39,7 @@ export function registerOnePasswordResources(
         permissionMutationEnabled: config.enablePermissionMutation,
         scriptRunnerEnabled: config.enableScriptRunner,
         scriptRunnerRoots: config.scriptRunnerRoots,
+        scriptRunnerAllowlistPaths: config.scriptRunnerAllowlistPaths,
         opCliAuthMode: config.opCliAuthMode,
         opCliPath: config.opCliPath,
         integrationName: config.integrationName,

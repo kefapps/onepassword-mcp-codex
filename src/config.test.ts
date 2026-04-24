@@ -37,9 +37,10 @@ test("parseConfig keeps write and script runner gates disabled by default", () =
   assert.equal(config.enablePermissionMutation, false);
   assert.equal(config.enableScriptRunner, false);
   assert.deepEqual(config.scriptRunnerRoots, []);
+  assert.deepEqual(config.scriptRunnerAllowlistPaths, []);
 });
 
-test("parseConfig requires trusted roots when script runner is enabled", () => {
+test("parseConfig requires configured allowlists when script runner is enabled", () => {
   assert.throws(
     () =>
       parseConfig(
@@ -47,11 +48,12 @@ test("parseConfig requires trusted roots when script runner is enabled", () => {
           "--account",
           "TestAccount",
           "--enable-script-runner=true",
+          "--script-runner-root=/tmp",
           "--op-cli-path=/usr/local/bin/op",
         ],
         "0.1.0",
       ),
-    /script-runner-root/,
+    /script-runner-allowlist/,
   );
 });
 
@@ -76,6 +78,7 @@ test("parseConfig rejects missing values for repeatable flags", () => {
         [
           "--account=TestAccount",
           "--enable-script-runner=true",
+          "--script-runner-allowlist=/tmp/.onepassword-mcp-codex.json",
           "--script-runner-root",
           "--op-cli-path=/usr/local/bin/op",
         ],
@@ -94,11 +97,29 @@ test("parseConfig requires absolute op path when script runner is enabled", () =
           "TestAccount",
           "--enable-script-runner=true",
           "--script-runner-root=/tmp",
+          "--script-runner-allowlist=/tmp/.onepassword-mcp-codex.json",
           "--op-cli-path=op",
         ],
         "0.1.0",
       ),
     /op-cli-path/,
+  );
+});
+
+test("parseConfig requires absolute allowlist paths when script runner is enabled", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--account",
+          "TestAccount",
+          "--enable-script-runner=true",
+          "--script-runner-allowlist=.onepassword-mcp-codex.json",
+          "--op-cli-path=/usr/local/bin/op",
+        ],
+        "0.1.0",
+      ),
+    /allowlist path must be absolute/,
   );
 });
 
@@ -109,6 +130,7 @@ test("parseConfig accepts hardened script runner configuration", () => {
       "TestAccount",
       "--enable-script-runner=true",
       "--script-runner-root=/tmp",
+      "--script-runner-allowlist=/tmp/.onepassword-mcp-codex.json",
       "--op-cli-path=/usr/local/bin/op",
       "--op-cli-auth-mode=manual-session",
     ],
@@ -117,6 +139,9 @@ test("parseConfig accepts hardened script runner configuration", () => {
 
   assert.equal(config.enableScriptRunner, true);
   assert.deepEqual(config.scriptRunnerRoots, ["/tmp"]);
+  assert.deepEqual(config.scriptRunnerAllowlistPaths, [
+    "/tmp/.onepassword-mcp-codex.json",
+  ]);
   assert.equal(config.opCliPath, "/usr/local/bin/op");
   assert.equal(config.opCliAuthMode, "manual-session");
 });
@@ -131,6 +156,7 @@ test("parseConfig requires account for script runner manual-session auth", () =>
             "--service-account-token=service-token",
             "--enable-script-runner=true",
             "--script-runner-root=/tmp",
+            "--script-runner-allowlist=/tmp/.onepassword-mcp-codex.json",
             "--op-cli-path=/usr/local/bin/op",
             "--op-cli-auth-mode=manual-session",
           ],
@@ -150,6 +176,7 @@ test("parseConfig requires service token for script runner service-account auth"
             "--account=TestAccount",
             "--enable-script-runner=true",
             "--script-runner-root=/tmp",
+            "--script-runner-allowlist=/tmp/.onepassword-mcp-codex.json",
             "--op-cli-path=/usr/local/bin/op",
             "--op-cli-auth-mode=service-account",
           ],

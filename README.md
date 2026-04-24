@@ -89,11 +89,12 @@ node dist/index.js \
   --account="Your Account Name" \
   --enable-script-runner=true \
   --script-runner-root="/absolute/path/to/trusted/projects" \
+  --script-runner-allowlist="/absolute/path/to/trusted/projects/my-repo/.onepassword-mcp-codex.json" \
   --op-cli-path="/absolute/path/to/op" \
   --op-cli-auth-mode=manual-session
 ```
 
-When the script runner is enabled, at least one trusted `--script-runner-root` and an absolute `--op-cli-path` are required. `--op-cli-auth-mode=auto` follows `--auth-mode`: service-account auth uses the service account token, desktop auth uses `manual-session`.
+When the script runner is enabled, at least one absolute `--script-runner-allowlist` and an absolute `--op-cli-path` are required. `--script-runner-root` is optional but recommended as an extra bound around configured workspace roots. `--op-cli-auth-mode=auto` follows `--auth-mode`: service-account auth uses the service account token, desktop auth uses `manual-session`.
 
 Enable write and destructive tools separately:
 
@@ -121,6 +122,7 @@ args = [
   "--account=Your Account Name or UUID",
   "--enable-script-runner=true",
   "--script-runner-root=/absolute/path/to/trusted/projects",
+  "--script-runner-allowlist=/absolute/path/to/trusted/projects/my-repo/.onepassword-mcp-codex.json",
   "--op-cli-path=/absolute/path/to/op",
   "--op-cli-auth-mode=manual-session",
 ]
@@ -185,11 +187,12 @@ Practical note:
 
 ## Running repo scripts with `op`
 
-For scripts that need the 1Password CLI, add an allowlist at the target repo root:
+For scripts that need the 1Password CLI, add an allowlist and pass its absolute path with `--script-runner-allowlist` when the MCP server starts:
 
 ```json
 {
   "version": 1,
+  "workspaceRoot": ".",
   "commands": {
     "deploy": {
       "description": "Deploy with 1Password CLI access",
@@ -208,13 +211,16 @@ Codex should call `op_script_run` with the repo `workspaceRoot` and `commandId`.
 Runner constraints:
 
 - The runner is off unless `--enable-script-runner=true`.
-- `workspaceRoot` must resolve below a configured `--script-runner-root`.
-- Commands must be declared in `.onepassword-mcp-codex.json`; no free-form shell is exposed.
+- `workspaceRoot` must match a workspace root from a startup-configured allowlist.
+- Allowlists are parsed and pinned when the MCP server starts; edits made later by the MCP client do not authorize new commands.
+- If `--script-runner-root` is configured, each allowlist workspace root must resolve below one of those roots.
+- Commands must be declared in a startup-configured allowlist; no free-form shell is exposed.
 - `cwd` is resolved inside the workspace root.
 - The command is spawned with `shell: false`.
 - Child processes receive a minimal environment plus the selected 1Password auth variables.
 - stdout/stderr are withheld by default. Use `returnOutput=true` only when operationally needed; it requires `--enable-secret-reveal=true` and the standard plaintext acknowledgement.
 - `OP_SESSION` and service account tokens are redacted from command output when output is explicitly returned.
+- In `manual-session` mode, a failed script is retried only after a deterministic `op whoami` check proves the cached session is invalid.
 
 ## Safety model
 
@@ -228,7 +234,7 @@ Runner constraints:
 - Write tools are disabled unless `--enable-writes=true`.
 - Destructive tools are disabled unless `--enable-destructive-actions=true`.
 - Vault permission mutation tools are disabled unless `--enable-permission-mutation=true`.
-- `op_script_run` is disabled by default and only runs commands from `.onepassword-mcp-codex.json` below configured trusted roots.
+- `op_script_run` is disabled by default and only runs commands from startup-configured allowlists.
 - Every plaintext reveal and every mutating write emits a JSONL audit entry.
 - Reveal requires the literal acknowledgement string `I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT`.
 

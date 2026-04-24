@@ -25,6 +25,7 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     enablePermissionMutation: false,
     enableScriptRunner: true,
     scriptRunnerRoots: [],
+    scriptRunnerAllowlistPaths: [],
     opCliPath: "op",
     opCliAuthMode: "auto",
     auditLogPath: "/tmp/onepassword-mcp-codex-test-audit.jsonl",
@@ -43,6 +44,21 @@ async function createWorkspace(allowlist: unknown): Promise<string> {
     "utf8",
   );
   return workspace;
+}
+
+function allowlistPath(workspace: string): string {
+  return join(workspace, SCRIPT_ALLOWLIST_FILENAME);
+}
+
+function createScriptRunnerConfig(
+  workspace: string,
+  overrides: Partial<ServerConfig> = {},
+): ServerConfig {
+  return createConfig({
+    scriptRunnerRoots: [workspace],
+    scriptRunnerAllowlistPaths: [allowlistPath(workspace)],
+    ...overrides,
+  });
 }
 
 class FakeProcessRunner implements ProcessRunner {
@@ -123,8 +139,9 @@ test("DefaultOpScriptRunner rejects cwd outside workspace", async () => {
     },
   });
   const processRunner = new FakeProcessRunner([]);
-  const sessionManager = new OpCliSessionManager(createConfig(), processRunner);
-  const runner = new DefaultOpScriptRunner(createConfig(), sessionManager, processRunner);
+  const config = createScriptRunnerConfig(workspace);
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
   await assert.rejects(
     () => runner.run(workspace, "escape"),
@@ -142,8 +159,9 @@ test("DefaultOpScriptRunner rejects relative command paths", async () => {
     },
   });
   const processRunner = new FakeProcessRunner([]);
-  const sessionManager = new OpCliSessionManager(createConfig(), processRunner);
-  const runner = new DefaultOpScriptRunner(createConfig(), sessionManager, processRunner);
+  const config = createScriptRunnerConfig(workspace);
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
   await assert.rejects(
     () => runner.run(workspace, "relative"),
@@ -162,14 +180,50 @@ test("DefaultOpScriptRunner rejects workspace outside configured roots", async (
   });
   const trustedRoot = await mkdtemp(join(tmpdir(), "op-runner-trusted-"));
   const processRunner = new FakeProcessRunner([]);
-  const config = createConfig({ scriptRunnerRoots: [trustedRoot] });
+  const config = createConfig({
+    scriptRunnerRoots: [trustedRoot],
+    scriptRunnerAllowlistPaths: [allowlistPath(workspace)],
+  });
+
+  assert.throws(
+    () =>
+      new DefaultOpScriptRunner(
+        config,
+        new OpCliSessionManager(config, processRunner),
+        processRunner,
+      ),
+    /outside the configured script runner roots/,
+  );
+});
+
+test("DefaultOpScriptRunner uses startup-pinned allowlists", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: "npm",
+      },
+    },
+  });
+  const config = createScriptRunnerConfig(workspace);
+  const processRunner = new FakeProcessRunner([processResult()]);
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
-  await assert.rejects(
-    () => runner.run(workspace, "deploy"),
-    /outside the configured script runner roots/,
+  await writeFile(
+    allowlistPath(workspace),
+    JSON.stringify({
+      version: 1,
+      commands: {
+        injected: {
+          command: "npm",
+        },
+      },
+    }),
+    "utf8",
   );
+
+  await assert.rejects(() => runner.run(workspace, "injected"), /not found/);
 });
 
 test("manual-session auth caches OP_SESSION and refreshes after auth failure", async () => {
@@ -189,12 +243,15 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
         "You are not currently signed in to your 1Password account. Run `op signin`.",
       exitCode: 1,
     }),
+    processResult({
+      stderr: "session expired",
+      exitCode: 1,
+    }),
     processResult({ stdout: "session-token-2\n" }),
     processResult({ stdout: "ok session-token-2\n" }),
   ]);
-  const config = createConfig({
+  const config = createScriptRunnerConfig(workspace, {
     opCliAuthMode: "manual-session",
-    scriptRunnerRoots: [workspace],
   });
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
@@ -209,7 +266,7 @@ test("manual-session auth caches OP_SESSION and refreshes after auth failure", a
   assert.equal(commandCalls[0]?.env?.OP_SERVICE_ACCOUNT_TOKEN, undefined);
 });
 
-test("manual-session auth does not refresh for generic app auth failures", async () => {
+test("manual-session auth does not refresh when deterministic auth check passes", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -222,13 +279,13 @@ test("manual-session auth does not refresh for generic app auth failures", async
   const processRunner = new FakeProcessRunner([
     processResult({ stdout: "session-token-1\n" }),
     processResult({
-      stderr: "remote API unauthorized: authentication failed",
+      stderr: "remote API says run op signin before deployment",
       exitCode: 1,
     }),
+    processResult(),
   ]);
-  const config = createConfig({
+  const config = createScriptRunnerConfig(workspace, {
     opCliAuthMode: "manual-session",
-    scriptRunnerRoots: [workspace],
   });
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
@@ -237,7 +294,7 @@ test("manual-session auth does not refresh for generic app auth failures", async
   const commandCalls = processRunner.calls.filter((call) => call.command === "npm");
 
   assert.equal(result.refreshedAuth, false);
-  assert.equal(result.stderr, "remote API unauthorized: authentication failed");
+  assert.equal(result.stderr, "remote API says run op signin before deployment");
   assert.equal(commandCalls.length, 1);
 });
 
@@ -258,11 +315,10 @@ test("service-account auth does not rerun scripts after auth-looking failures", 
       exitCode: 1,
     }),
   ]);
-  const config = createConfig({
+  const config = createScriptRunnerConfig(workspace, {
     authMode: "service-account",
     serviceAccountToken: "service-token",
     opCliAuthMode: "service-account",
-    scriptRunnerRoots: [workspace],
   });
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);

@@ -421,7 +421,7 @@ export function createOnePasswordMcpServer(
       "op_script_list",
       {
         description:
-          "List repo-allowlisted scripts that can run with persistent 1Password CLI authentication managed by the MCP process.",
+          "List startup-configured allowlisted scripts that can run with persistent 1Password CLI authentication managed by the MCP process.",
         inputSchema: {
           workspaceRoot: z.string().min(1),
         },
@@ -441,7 +441,7 @@ export function createOnePasswordMcpServer(
       "op_script_run",
       {
         description:
-          "Run one repo-allowlisted script with 1Password CLI auth injected by the MCP process. No free-form shell commands are accepted.",
+          "Run one startup-configured allowlisted script with 1Password CLI auth injected by the MCP process. No free-form shell commands are accepted.",
         inputSchema: {
           workspaceRoot: z.string().min(1),
           commandId: z.string().min(1),

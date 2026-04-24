@@ -18,7 +18,7 @@ The main security concern is the new script runner. It turns the MCP into a brok
 
 ### SEC-1: `workspaceRoot` is client-controlled, so the script allowlist is not a strong security boundary
 
-Status: remediated. `--enable-script-runner=true` now requires at least one absolute `--script-runner-root`, and allowlists are only accepted under those roots.
+Status: remediated. `--enable-script-runner=true` now requires at least one absolute `--script-runner-allowlist`, and allowlists are parsed and pinned when the MCP server starts. Optional `--script-runner-root` values further constrain the configured workspace roots.
 
 Impact: A client that can point the MCP at an attacker-controlled directory can execute commands from that directory with 1Password CLI auth injected.
 
@@ -34,9 +34,9 @@ The allowlist protects against free-form command strings only if the allowlist f
 
 Recommended fix:
 
-- Add server-level `--script-runner-root=/approved/path` or `--script-runner-config=/absolute/file`.
-- Reject `workspaceRoot` outside configured roots before reading any allowlist.
-- Prefer startup-loaded command definitions for high-risk environments, or verify the allowlist file is owned by the current user and not group/world writable.
+- Add server-level `--script-runner-allowlist=/absolute/file`.
+- Reject `workspaceRoot` values that do not match a startup-configured allowlist workspace root.
+- Prefer startup-loaded command definitions for high-risk environments.
 
 ### SEC-2: Child scripts inherit the full MCP process environment plus 1Password auth
 
@@ -209,7 +209,7 @@ Recommended fix:
 
 ## Recommended Operational Defaults
 
-1. Configure `--script-runner-root` as narrowly as possible.
+1. Configure explicit `--script-runner-allowlist` files and keep optional `--script-runner-root` bounds as narrow as possible.
 2. Keep `--enable-writes`, `--enable-destructive-actions`, and `--enable-permission-mutation` disabled unless the session explicitly needs them.
 3. Prefer `op_script_run` without `returnOutput`; use `returnOutput=true` only when the output itself is required.
 4. Keep `--enable-secret-reveal=false` by default.

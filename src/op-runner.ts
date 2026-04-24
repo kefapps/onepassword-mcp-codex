@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, readFileSync, realpathSync } from "node:fs";
 import { access, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
@@ -95,6 +95,7 @@ const commandSchema = z.object({
 
 const allowlistSchema = z.object({
   version: z.literal(1),
+  workspaceRoot: z.string().min(1).optional(),
   commands: z.record(commandSchema),
 });
 
@@ -169,29 +170,6 @@ function resolveAuthMode(config: ServerConfig): ResolvedOpCliAuthMode {
   }
 
   return config.opCliAuthMode;
-}
-
-function isAuthenticationFailure(result: ProcessRunResult): boolean {
-  if (result.exitCode === 0) {
-    return false;
-  }
-
-  const output = `${result.stdout}\n${result.stderr}\n${result.errorMessage ?? ""}`;
-  return output
-    .split(/\r?\n/)
-    .some((line) =>
-      [
-        /\b(?:op|1password)\b.*\bnot (?:currently )?signed in\b/i,
-        /\bnot (?:currently )?signed in\b.*\b(?:op|1password)\b/i,
-        /\b(?:op|1password)\b.*\bsign in\b/i,
-        /\bsign in\b.*\b(?:op|1password)\b/i,
-        /\brun [`'"]?op signin\b/i,
-        /\bOP_SESSION(?:_[A-Z0-9_]+)?\b.*\b(?:expired|invalid)\b/i,
-        /\b(?:expired|invalid)\b.*\bOP_SESSION(?:_[A-Z0-9_]+)?\b/i,
-        /\b(?:op|1password)\b.*\bsession\b.*\b(?:expired|invalid)\b/i,
-        /\bsession\b.*\b(?:expired|invalid)\b.*\b(?:op|1password)\b/i,
-      ].some((pattern) => pattern.test(line)),
-    );
 }
 
 function forceKillGraceMs(timeoutMs: number): number {
@@ -398,6 +376,30 @@ export class OpCliSessionManager {
     };
   }
 
+  public async isCurrentManualSessionValid(): Promise<boolean> {
+    if (this.resolvedAuthMode !== "manual-session") {
+      return true;
+    }
+    if (!this.config.account || !this.cachedSessionToken) {
+      return false;
+    }
+
+    const result = await this.processRunner.run(
+      this.config.opCliPath,
+      ["whoami", "--account", this.config.account],
+      {
+        env: createChildEnvironment("manual-session", {
+          OP_ACCOUNT: this.config.account,
+          OP_SESSION: this.cachedSessionToken,
+        }),
+        timeoutMs: DEFAULT_PROCESS_TIMEOUT_MS,
+        maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+      },
+    );
+
+    return result.exitCode === 0;
+  }
+
   private async ensureDesktopValidated(): Promise<void> {
     if (this.desktopValidated) {
       return;
@@ -454,11 +456,19 @@ export class OpCliSessionManager {
 }
 
 export class DefaultOpScriptRunner implements OpScriptRunner {
+  private readonly allowlistsByWorkspaceRoot: Map<string, ScriptAllowlist>;
+
   public constructor(
     private readonly config: ServerConfig,
     private readonly sessionManager = new OpCliSessionManager(config),
     private readonly processRunner: ProcessRunner = new NodeProcessRunner(),
-  ) {}
+  ) {
+    this.allowlistsByWorkspaceRoot = new Map(
+      (config.enableScriptRunner ? loadConfiguredScriptAllowlists(config) : []).map(
+        (allowlist) => [allowlist.workspaceRoot, allowlist],
+      ),
+    );
+  }
 
   public status(): OpSessionStatus {
     return this.sessionManager.status();
@@ -469,7 +479,15 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
   }
 
   public async list(workspaceRoot: string): Promise<ScriptAllowlist> {
-    return loadScriptAllowlist(workspaceRoot, this.config.scriptRunnerRoots);
+    const resolvedWorkspaceRoot = await realpath(workspaceRoot);
+    const allowlist = this.allowlistsByWorkspaceRoot.get(resolvedWorkspaceRoot);
+    if (!allowlist) {
+      throw new Error(
+        `Workspace ${resolvedWorkspaceRoot} does not have a startup-configured script allowlist.`,
+      );
+    }
+
+    return allowlist;
   }
 
   public async run(
@@ -513,10 +531,12 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     };
 
     const firstResult = await runOnce();
-    if (!isAuthenticationFailure(firstResult)) {
-      return firstResult;
-    }
-    if (firstResult.authMode !== "manual-session") {
+    if (
+      firstResult.exitCode === 0 ||
+      firstResult.timedOut ||
+      firstResult.authMode !== "manual-session" ||
+      (await this.sessionManager.isCurrentManualSessionValid())
+    ) {
       return firstResult;
     }
 
@@ -529,31 +549,14 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
   }
 }
 
-export async function loadScriptAllowlist(
+function scriptAllowlistFromParsed(
+  allowlistPath: string,
   workspaceRoot: string,
-  allowedRoots: string[] = [],
-): Promise<ScriptAllowlist> {
-  const resolvedWorkspaceRoot = await realpath(workspaceRoot);
-  if (allowedRoots.length > 0) {
-    const resolvedAllowedRoots = await Promise.all(
-      allowedRoots.map((root) => realpath(root)),
-    );
-    const withinAllowedRoot = resolvedAllowedRoots.some((root) =>
-      isPathInside(root, resolvedWorkspaceRoot),
-    );
-    if (!withinAllowedRoot) {
-      throw new Error(
-        `Workspace ${resolvedWorkspaceRoot} is outside the configured script runner roots.`,
-      );
-    }
-  }
-  const allowlistPath = join(resolvedWorkspaceRoot, SCRIPT_ALLOWLIST_FILENAME);
-  const raw = await readFile(allowlistPath, "utf8");
-  const parsed = allowlistSchema.parse(JSON.parse(raw));
-
+  parsed: z.infer<typeof allowlistSchema>,
+): ScriptAllowlist {
   return {
     path: allowlistPath,
-    workspaceRoot: resolvedWorkspaceRoot,
+    workspaceRoot,
     commands: Object.entries(parsed.commands).map(([id, command]) => ({
       id,
       description: command.description,
@@ -564,6 +567,63 @@ export async function loadScriptAllowlist(
       sensitiveOutput: command.sensitiveOutput ?? false,
     })),
   };
+}
+
+function assertWorkspaceRootAllowed(
+  workspaceRoot: string,
+  allowedRoots: string[],
+): void {
+  const withinAllowedRoot = allowedRoots.some((root) =>
+    isPathInside(root, workspaceRoot),
+  );
+  if (!withinAllowedRoot) {
+    throw new Error(
+      `Workspace ${workspaceRoot} is outside the configured script runner roots.`,
+    );
+  }
+}
+
+export function loadConfiguredScriptAllowlists(
+  config: Pick<ServerConfig, "scriptRunnerAllowlistPaths" | "scriptRunnerRoots">,
+): ScriptAllowlist[] {
+  const resolvedAllowedRoots = config.scriptRunnerRoots.map((root) =>
+    realpathSync(root),
+  );
+
+  return config.scriptRunnerAllowlistPaths.map((allowlistPath) => {
+    const resolvedAllowlistPath = realpathSync(allowlistPath);
+    const raw = readFileSync(resolvedAllowlistPath, "utf8");
+    const parsed = allowlistSchema.parse(JSON.parse(raw));
+    const workspaceRoot = realpathSync(
+      parsed.workspaceRoot
+        ? resolve(dirname(resolvedAllowlistPath), parsed.workspaceRoot)
+        : dirname(resolvedAllowlistPath),
+    );
+
+    if (resolvedAllowedRoots.length > 0) {
+      assertWorkspaceRootAllowed(workspaceRoot, resolvedAllowedRoots);
+    }
+
+    return scriptAllowlistFromParsed(resolvedAllowlistPath, workspaceRoot, parsed);
+  });
+}
+
+export async function loadScriptAllowlist(
+  workspaceRoot: string,
+  allowedRoots: string[] = [],
+): Promise<ScriptAllowlist> {
+  const resolvedWorkspaceRoot = await realpath(workspaceRoot);
+  if (allowedRoots.length > 0) {
+    const resolvedAllowedRoots = await Promise.all(
+      allowedRoots.map((root) => realpath(root)),
+    );
+    assertWorkspaceRootAllowed(resolvedWorkspaceRoot, resolvedAllowedRoots);
+  }
+  const allowlistPath = join(resolvedWorkspaceRoot, SCRIPT_ALLOWLIST_FILENAME);
+  const raw = await readFile(allowlistPath, "utf8");
+  const parsed = allowlistSchema.parse(JSON.parse(raw));
+
+  return scriptAllowlistFromParsed(allowlistPath, resolvedWorkspaceRoot, parsed);
 }
 
 async function resolveWorkspacePath(

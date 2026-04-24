@@ -14,6 +14,7 @@ function createConfig(): ServerConfig {
     enablePermissionMutation: false,
     enableScriptRunner: false,
     scriptRunnerRoots: [],
+    scriptRunnerAllowlistPaths: [],
     opCliPath: "op",
     opCliAuthMode: "auto",
     auditLogPath: "/tmp/onepassword-mcp-codex-test-audit.jsonl",
