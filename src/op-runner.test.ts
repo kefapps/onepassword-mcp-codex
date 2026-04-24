@@ -1,0 +1,211 @@
+import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import type { ServerConfig } from "./config.js";
+import {
+  DEFAULT_OUTPUT_LIMIT_BYTES,
+  DefaultOpScriptRunner,
+  NodeProcessRunner,
+  OpCliSessionManager,
+  SCRIPT_ALLOWLIST_FILENAME,
+  loadScriptAllowlist,
+  type ProcessRunResult,
+  type ProcessRunner,
+} from "./op-runner.js";
+
+function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
+  return {
+    authMode: "desktop",
+    account: "TestAccount",
+    enableSecretReveal: false,
+    enableScriptRunner: true,
+    opCliPath: "op",
+    opCliAuthMode: "auto",
+    auditLogPath: "/tmp/onepassword-mcp-codex-test-audit.jsonl",
+    logLevel: "info",
+    integrationName: "Test",
+    integrationVersion: "0.1.0",
+    ...overrides,
+  };
+}
+
+async function createWorkspace(allowlist: unknown): Promise<string> {
+  const workspace = await mkdtemp(join(tmpdir(), "op-runner-test-"));
+  await writeFile(
+    join(workspace, SCRIPT_ALLOWLIST_FILENAME),
+    JSON.stringify(allowlist, null, 2),
+    "utf8",
+  );
+  return workspace;
+}
+
+class FakeProcessRunner implements ProcessRunner {
+  public readonly calls: Array<{
+    command: string;
+    args: string[];
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+  }> = [];
+
+  public constructor(private readonly results: ProcessRunResult[]) {}
+
+  public async run(
+    command: string,
+    args: string[],
+    options: {
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+      timeoutMs: number;
+      maxOutputBytes: number;
+    },
+  ): Promise<ProcessRunResult> {
+    this.calls.push({
+      command,
+      args,
+      cwd: options.cwd,
+      env: options.env,
+    });
+
+    const result = this.results.shift();
+    if (!result) {
+      throw new Error("No fake process result queued.");
+    }
+    return result;
+  }
+}
+
+function processResult(overrides: Partial<ProcessRunResult> = {}): ProcessRunResult {
+  return {
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    outputTruncated: false,
+    durationMs: 1,
+    ...overrides,
+  };
+}
+
+test("loadScriptAllowlist parses command defaults", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: "npm",
+        args: ["run", "deploy"],
+      },
+    },
+  });
+
+  const allowlist = await loadScriptAllowlist(workspace);
+
+  assert.equal(allowlist.commands[0]?.id, "deploy");
+  assert.equal(allowlist.commands[0]?.cwd, ".");
+  assert.equal(allowlist.commands[0]?.sensitiveOutput, false);
+  assert.deepEqual(allowlist.commands[0]?.args, ["run", "deploy"]);
+});
+
+test("DefaultOpScriptRunner rejects cwd outside workspace", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      escape: {
+        command: "npm",
+        cwd: "..",
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([]);
+  const sessionManager = new OpCliSessionManager(createConfig(), processRunner);
+  const runner = new DefaultOpScriptRunner(createConfig(), sessionManager, processRunner);
+
+  await assert.rejects(
+    () => runner.run(workspace, "escape"),
+    /resolves outside workspace/,
+  );
+});
+
+test("DefaultOpScriptRunner rejects relative command paths", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      relative: {
+        command: "./script.sh",
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([]);
+  const sessionManager = new OpCliSessionManager(createConfig(), processRunner);
+  const runner = new DefaultOpScriptRunner(createConfig(), sessionManager, processRunner);
+
+  await assert.rejects(
+    () => runner.run(workspace, "relative"),
+    /PATH executable name or an absolute path inside the workspace/,
+  );
+});
+
+test("manual-session auth caches OP_SESSION and refreshes after auth failure", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: "npm",
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "session-token-1\n" }),
+    processResult({
+      stderr: "session expired",
+      exitCode: 1,
+    }),
+    processResult({ stdout: "session-token-2\n" }),
+    processResult({ stdout: "ok session-token-2\n" }),
+  ]);
+  const config = createConfig({ opCliAuthMode: "manual-session" });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.run(workspace, "deploy");
+  const commandCalls = processRunner.calls.filter((call) => call.command === "npm");
+
+  assert.equal(result.refreshedAuth, true);
+  assert.equal(result.stdout, "ok [REDACTED]\n");
+  assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
+  assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-2");
+});
+
+test("service-account auth injects OP_SERVICE_ACCOUNT_TOKEN without OP_SESSION", async () => {
+  const processRunner = new FakeProcessRunner([]);
+  const config = createConfig({
+    authMode: "service-account",
+    serviceAccountToken: "service-token",
+    opCliAuthMode: "service-account",
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+
+  const auth = await sessionManager.getEnvironment();
+
+  assert.equal(auth.mode, "service-account");
+  assert.equal(auth.env.OP_SERVICE_ACCOUNT_TOKEN, "service-token");
+  assert.equal(auth.env.OP_SESSION, undefined);
+});
+
+test("NodeProcessRunner times out long-running commands", async () => {
+  const runner = new NodeProcessRunner();
+
+  const result = await runner.run(
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 1000)"],
+    {
+      timeoutMs: 50,
+      maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+    },
+  );
+
+  assert.equal(result.timedOut, true);
+});
