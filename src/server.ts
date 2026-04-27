@@ -310,6 +310,7 @@ function commandOutputText(result: {
   exitCode: number | null;
   timedOut: boolean;
   outputTruncated: boolean;
+  sensitiveOutput: boolean;
   errorMessage?: string;
 }, includeOutput: boolean): string {
   const sections: string[] = [];
@@ -320,7 +321,7 @@ function commandOutputText(result: {
   if (includeOutput && result.stderr) {
     sections.push(result.stderr.trimEnd());
   }
-  if (result.errorMessage) {
+  if (result.errorMessage && (includeOutput || !result.sensitiveOutput)) {
     sections.push(result.errorMessage);
   }
   if (sections.length === 0) {
@@ -379,7 +380,9 @@ function scriptRunStructuredContent(
         }
       : {
           outputState: "withheld",
-          errorMessage: result.errorMessage,
+          ...(result.errorMessage && !result.sensitiveOutput
+            ? { errorMessage: result.errorMessage }
+            : {}),
         }),
   };
 }
@@ -391,7 +394,7 @@ export function createOnePasswordMcpServer(
   scriptRunner: OpScriptRunner = new DefaultOpScriptRunner(config),
 ): McpServer {
   const server = new McpServer({
-    name: "onepassword-mcp-codex",
+    name: "mcp-1password",
     version: config.integrationVersion,
   });
 
@@ -412,6 +415,11 @@ export function createOnePasswordMcpServer(
         destructiveActionsEnabled: config.enableDestructiveActions,
         permissionMutationEnabled: config.enablePermissionMutation,
         scriptRunnerEnabled: config.enableScriptRunner,
+        transport: config.transport,
+        httpHost: config.httpHost,
+        httpPort: config.httpPort,
+        httpPath: config.httpPath,
+        httpRequireBearer: config.httpRequireBearer,
         ...SDK_CAPABILITIES,
       }),
   );
