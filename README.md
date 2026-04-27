@@ -1,252 +1,175 @@
-# onepassword-mcp-codex
+# mcp-1password
 
-Standalone MCP server for 1Password with:
+> **⚠ Status : Public Beta**
+>
+> Ce package est en développement actif (v0.x). L'API et les flags CLI peuvent changer entre versions mineures. Le SDK sous-jacent `@1password/sdk` est lui-même une version beta. Épinglez une version exacte (`mcp-1password@x.y.z`) dans les environnements de production.
 
-- desktop-app authentication via the official `@1password/sdk` beta
-- opaque-by-default item and environment reads
-- explicit, audited plaintext reveal behind a startup flag
-- vault administration and group-based vault permission updates where the official JS SDK supports them
+Un serveur [Model Context Protocol](https://modelcontextprotocol.io/) qui expose 1Password aux agents d'IA — avec une **gestion des secrets opaque par défaut**. Les secrets ne sont jamais révélés sauf opt-in explicite.
 
-## Current scope
+## Fonctionnalités
 
-Implemented now:
+- Lire et rechercher coffres, items, et environnements (secrets redactés par défaut)
+- Créer, mettre à jour, archiver, et supprimer items et coffres (`--enable-writes`, `--enable-destructive-actions`)
+- Gérer les permissions de groupe sur les coffres (`--enable-permission-mutation`)
+- Révéler les secrets en clair sur demande, avec acquittement explicite (`--enable-secret-reveal`)
+- Exécuter des scripts pré-approuvés avec auth 1Password CLI injectée (`--enable-script-runner`)
+- Transports : stdio (défaut) ou HTTP avec auth bearer token
+- Journal d'audit complet de toutes les actions sensibles (JSONL, `~/.local/share/mcp-1password/audit.jsonl`)
 
-- `sdk_capabilities`
-- `password_generate`, `password_generate_memorable`, `password_read`, `password_create`, `password_update`
-- `vault_list`, `vault_get`, `vault_create`, `vault_update`, `vault_delete`
-- `group_get`
-- `vault_permissions_get`, `vault_permissions_grant_group`, `vault_permissions_update_group`, `vault_permissions_revoke_group`
-- `item_search`, `item_get_metadata`, `item_create`, `item_update`, `item_archive`, `item_delete`
-- `environment_get_variables`, `environment_get_variable`, `environment_reveal_variable`
-- `secret_reveal`
-- optional script runner: `op_script_list`, `op_script_run`, `op_session_status`, `op_session_reset`
+## Prérequis
 
-Implemented MCP prompts:
+- **Node.js ≥ 20.10**
+- **Application 1Password desktop** (pour `--auth-mode=desktop`) — nécessite la version beta avec l'intégration SDK activée
+- **1Password CLI (`op`)** — uniquement requis avec `--enable-script-runner=true`
 
-- `credential-rotation`
-- `vault-audit`
-- `environment-inspection`
-- `generate-secure-password`
+### Activer l'intégration desktop (mode desktop uniquement)
 
-Implemented MCP resources:
+1. Dans 1Password, passer sur le canal beta : *Paramètres → Mises à jour → Canal bêta*
+2. Activer l'intégration desktop : *Paramètres → Développeur → Se connecter avec les SDK 1Password*
 
-- `onepassword://config`
-- `onepassword://vaults`
-- `onepassword://vaults/{vaultId}/items`
-- `onepassword://vaults/{vaultId}/items/{itemId}/metadata`
-- `onepassword://environments/{environmentId}/variables`
-
-Not implemented because the official `@1password/sdk@0.4.1-beta.1` JS surface does not expose them yet:
-
-- group listing/creation/membership update
-- user listing/get/suspend
-- create/update/delete/list des Environments eux-mêmes
-
-## Requirements
-
-Desktop mode requires the 1Password desktop app beta and the SDK integration enabled:
-
-1. In 1Password, switch to the beta release channel.
-2. Open `Settings > Developer`.
-3. Enable integration with other apps / SDKs.
-4. Start the server with the account name or UUID as shown in the app sidebar.
-
-## Install
+## Installation
 
 ```bash
-npm install
-npm run build
+# Installation globale npm
+npm install -g mcp-1password
+
+# Ou exécution à la demande sans installation globale
+npx mcp-1password --auth-mode=desktop --account="Mon Compte"
 ```
 
-## Run
+## Démarrage rapide
 
-Desktop auth:
+### Claude Desktop (transport stdio)
 
-```bash
-node dist/index.js --auth-mode=desktop --account="Your Account Name"
+Modifier `~/Library/Application\ Support/Claude/claude_desktop_config.json` :
+
+```json
+{
+  "mcpServers": {
+    "1password": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-1password",
+        "--auth-mode=desktop",
+        "--account=Nom ou UUID du compte 1Password"
+      ]
+    }
+  }
+}
 ```
 
-Service account auth:
+### Compte de service (CI / headless)
 
-```bash
-OP_SERVICE_ACCOUNT_TOKEN=... node dist/index.js --auth-mode=service-account
+```json
+{
+  "mcpServers": {
+    "1password": {
+      "command": "npx",
+      "args": ["-y", "mcp-1password", "--auth-mode=service-account"],
+      "env": {
+        "OP_SERVICE_ACCOUNT_TOKEN": "<votre-token-de-compte-de-service>"
+      }
+    }
+  }
+}
 ```
 
-Enable plaintext reveal explicitly:
+### Transport HTTP (agents distants)
 
 ```bash
-node dist/index.js \
+OP_MCP_HTTP_BEARER_TOKEN="$(openssl rand -base64 32)" \
+mcp-1password \
   --auth-mode=desktop \
-  --account="Your Account Name" \
-  --enable-secret-reveal=true
+  --account="Mon Compte" \
+  --transport=http \
+  --http-port=3010
 ```
 
-Enable the allowlisted script runner explicitly:
+> **⚠ Sécurité — pas de TLS intégré :** Le transport HTTP utilise du HTTP en clair. Si vous liez le serveur à une interface autre que `127.0.0.1`, le bearer token transite en clair. Utilisez un reverse proxy avec terminaison TLS (nginx, Caddy, Traefik) pour toute exposition non-localhost.
 
-```bash
-node dist/index.js \
-  --auth-mode=desktop \
-  --account="Your Account Name" \
-  --enable-script-runner=true \
-  --script-runner-root="/absolute/path/to/trusted/projects" \
-  --script-runner-allowlist="/absolute/path/to/trusted/projects/my-repo/.onepassword-mcp-codex.json" \
-  --op-cli-path="/absolute/path/to/op" \
-  --op-cli-auth-mode=manual-session
-```
+## Référence de configuration
 
-When the script runner is enabled, at least one absolute `--script-runner-allowlist` and an absolute `--op-cli-path` are required. `--script-runner-root` is optional but recommended as an extra bound around configured workspace roots. `--op-cli-auth-mode=auto` follows `--auth-mode`: service-account auth uses the service account token, desktop auth uses `manual-session`.
+Tous les flags peuvent aussi être définis via des variables d'environnement.
 
-Enable write and destructive tools separately:
+| Flag | Variable d'env | Défaut | Description |
+|---|---|---|---|
+| `--auth-mode` | `OP_MCP_AUTH_MODE` | `desktop` | `desktop` ou `service-account` |
+| `--account` | `OP_MCP_ACCOUNT` | — | Nom ou UUID du compte (requis en mode desktop) |
+| `--service-account-token` | `OP_SERVICE_ACCOUNT_TOKEN` | — | Token (requis en mode service-account) |
+| `--enable-secret-reveal` | `OP_MCP_ENABLE_SECRET_REVEAL` | `false` | Autoriser la révélation en clair des secrets |
+| `--enable-writes` | `OP_MCP_ENABLE_WRITES` | `false` | Autoriser la création et mise à jour d'items/coffres |
+| `--enable-destructive-actions` | `OP_MCP_ENABLE_DESTRUCTIVE_ACTIONS` | `false` | Autoriser la suppression et l'archivage |
+| `--enable-permission-mutation` | `OP_MCP_ENABLE_PERMISSION_MUTATION` | `false` | Autoriser la modification des permissions de coffre |
+| `--enable-script-runner` | `OP_MCP_ENABLE_SCRIPT_RUNNER` | `false` | Autoriser l'exécution de scripts allowlistés |
+| `--script-runner-allowlist` | `OP_MCP_SCRIPT_RUNNER_ALLOWLISTS` | — | Chemin absolu vers un fichier d'allowlist (répétable) |
+| `--script-runner-root` | `OP_MCP_SCRIPT_RUNNER_ROOTS` | — | Racine de workspace de confiance (répétable) |
+| `--op-cli-path` | `OP_MCP_OP_CLI_PATH` | `op` | Chemin vers le binaire op CLI (doit être absolu si script runner activé) |
+| `--op-cli-auth-mode` | `OP_MCP_OP_CLI_AUTH_MODE` | `auto` | `auto`, `desktop`, `manual-session`, `service-account` |
+| `--transport` | `OP_MCP_TRANSPORT` | `stdio` | `stdio` ou `http` |
+| `--http-host` | `OP_MCP_HTTP_HOST` | `127.0.0.1` | Adresse de bind pour le transport HTTP |
+| `--http-port` | `OP_MCP_HTTP_PORT` | `3010` | Port pour le transport HTTP |
+| `--http-path` | `OP_MCP_HTTP_PATH` | `/mcp` | Préfixe de chemin pour le transport HTTP |
+| `--http-require-bearer` | `OP_MCP_HTTP_REQUIRE_BEARER` | `true` si HTTP | Exiger l'en-tête `Authorization: Bearer` |
+| `--audit-log-path` | `OP_MCP_AUDIT_LOG_PATH` | `~/.local/share/mcp-1password/audit.jsonl` | Chemin du journal d'audit |
+| `--log-level` | `OP_MCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
-```bash
-node dist/index.js \
-  --auth-mode=desktop \
-  --account="Your Account Name" \
-  --enable-writes=true \
-  --enable-destructive-actions=false \
-  --enable-permission-mutation=false
-```
+## Script runner
 
-## Codex MCP config example
+Le script runner permet aux agents d'invoquer des commandes shell pré-approuvées avec l'authentification 1Password CLI injectée automatiquement. **Aucune commande shell libre n'est acceptée** — seules les commandes définies dans un fichier d'allowlist configuré au démarrage sont exécutables.
 
-Codex reads MCP server configuration from `~/.codex/config.toml`.
+### Format du fichier d'allowlist
 
-Recommended desktop setup:
-
-```toml
-[mcp_servers.onepassword]
-command = "node"
-args = [
-  "/absolute/path/to/onepassword-mcp-codex/dist/index.js",
-  "--auth-mode=desktop",
-  "--account=Your Account Name or UUID",
-  "--enable-script-runner=true",
-  "--script-runner-root=/absolute/path/to/trusted/projects",
-  "--script-runner-allowlist=/absolute/path/to/trusted/projects/my-repo/.onepassword-mcp-codex.json",
-  "--op-cli-path=/absolute/path/to/op",
-  "--op-cli-auth-mode=manual-session",
-]
-cwd = "/absolute/path/to/onepassword-mcp-codex"
-enabled = true
-startup_timeout_sec = 60.0
-tool_timeout_sec = 60.0
-default_tools_approval_mode = "approve"
-enabled_tools = [
-  "sdk_capabilities",
-  "password_generate",
-  "password_generate_memorable",
-  "password_read",
-  "vault_list",
-  "vault_get",
-  "group_get",
-  "vault_permissions_get",
-  "item_search",
-  "item_get_metadata",
-  "environment_get_variables",
-  "environment_get_variable",
-  "environment_reveal_variable",
-  "secret_reveal",
-  "op_script_list",
-  "op_script_run",
-  "op_session_status",
-  "op_session_reset",
-]
-```
-
-Why this shape:
-
-- `cwd` makes local Node resolution predictable.
-- `enabled_tools` keeps the server surface explicit and stable.
-- `default_tools_approval_mode = "approve"` removes approval friction for routine calls.
-
-## Making Codex prefer MCP over `op`
-
-Codex will not automatically "understand" that your local MCP is always better than shell access unless you make that preference explicit. The most effective setup is:
-
-1. Configure the MCP server in `~/.codex/config.toml`.
-2. Add a repo-level `AGENTS.md` instruction that tells Codex to prefer the `onepassword` MCP server over `op` and raw shell access.
-3. Keep the MCP surface narrow and task-oriented with `enabled_tools`, so the server is easy for the model to select.
-
-Example `AGENTS.md` snippet:
-
-```md
-## 1Password
-
-- Prefer the `onepassword` MCP server for any 1Password task.
-- Use MCP tools before `op`, shell commands, environment-variable inspection, or direct reads of 1Password files.
-- For repo scripts that require `op`, use `op_script_run` with an allowlisted command instead of starting a persistent shell.
-- Fall back to `op` or raw shell only if the MCP server is unavailable or missing the required capability.
-- Prefer redacted reads first. Use plaintext reveal only when the task explicitly requires it.
-```
-
-Practical note:
-
-- If you leave a capability only in shell and not in MCP, Codex will still use shell for that gap.
-- If a capability exists in both places, the `AGENTS.md` preference is the clearest way to bias tool choice.
-- Keep `--enable-secret-reveal=true` off by default and only enable it for sessions that truly need plaintext.
-
-## Running repo scripts with `op`
-
-For scripts that need the 1Password CLI, add an allowlist and pass its absolute path with `--script-runner-allowlist` when the MCP server starts:
+Créer un fichier `.onepassword-mcp.json` à la racine de votre projet :
 
 ```json
 {
   "version": 1,
   "workspaceRoot": ".",
   "commands": {
-    "deploy": {
-      "description": "Deploy with 1Password CLI access",
-      "command": "/absolute/path/to/npm",
-      "args": ["run", "deploy"],
+    "deploy-staging": {
+      "description": "Déployer en environnement de staging",
+      "command": "/usr/local/bin/deploy.sh",
+      "args": ["--env", "staging"],
       "cwd": ".",
-      "timeoutMs": 600000,
+      "timeoutMs": 120000,
       "sensitiveOutput": false
     }
   }
 }
 ```
 
-Codex should call `op_script_run` with the repo `workspaceRoot` and `commandId`. The MCP process injects `OP_SESSION`, `OP_SERVICE_ACCOUNT_TOKEN`, or `OP_ACCOUNT` into the child process depending on `--op-cli-auth-mode`.
+- `command` doit être un **chemin absolu** vers un exécutable
+- `sensitiveOutput: true` empêche stdout/stderr d'être retournés à l'agent, sauf si `returnOutput=true` est explicitement demandé avec l'acquittement de révélation
 
-Runner constraints:
+## Modèle de sécurité
 
-- The runner is off unless `--enable-script-runner=true`.
-- `workspaceRoot` must match a workspace root from a startup-configured allowlist.
-- Allowlists are parsed and pinned when the MCP server starts; edits made later by the MCP client do not authorize new commands.
-- If `--script-runner-root` is configured, each allowlist workspace root must resolve below one of those roots.
-- Commands must be declared in a startup-configured allowlist; no free-form shell is exposed.
-- Command paths must be absolute executable paths; `PATH` lookup is not used for allowlisted commands.
-- `cwd` is resolved inside the workspace root.
-- The command is spawned with `shell: false`.
-- Child processes receive a minimal environment plus the selected 1Password auth variables.
-- stdout/stderr are withheld by default. Use `returnOutput=true` only when operationally needed; it requires `--enable-secret-reveal=true` and the standard plaintext acknowledgement.
-- `OP_SESSION` and service account tokens are redacted from command output when output is explicitly returned.
-- In `manual-session` mode, the cached session is checked before launching a script and refreshed only when `op whoami` deterministically reports an invalid session. Failed scripts are not re-executed automatically.
+- **Secrets opaques par défaut.** Tous les champs d'items sont retournés avec `valueState: "redacted"` sauf si `--enable-secret-reveal=true` est passé.
+- **La révélation en clair requiert un consentement explicite.** Les outils qui retournent des secrets nécessitent `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT"`.
+- **Toutes les capacités dangereuses sont opt-in et désactivées par défaut** (écriture, actions destructives, mutation de permissions, révélation de secrets, script runner).
+- **Chaque action sensible est journalisée** dans un fichier JSONL. Les références de secrets et tokens d'auth sont automatiquement redactés des logs.
+- **Le script runner utilise `spawn` avec `shell: false`** — aucune injection shell n'est possible. Les commandes doivent être allowlistées et utiliser des chemins absolus.
+- **La comparaison du bearer token utilise `crypto.timingSafeEqual`** pour prévenir les attaques temporelles.
+- **Le transport HTTP se bind sur localhost (`127.0.0.1`) par défaut.** Un bind non-localhost émet un warning TLS au démarrage.
+- **`errorMessage` des scripts avec `sensitiveOutput: true` est retenu** sauf si `returnOutput=true` est explicitement demandé.
 
-## Safety model
+## Notes sur les ressources MCP
 
-- `password_read` returns redacted metadata by default. Plaintext requires `reveal=true`, a reason, and the acknowledgement string.
-- `password_create` and `password_update` never return stored secrets in plaintext; they return redacted item metadata plus generation metadata.
-- `password_generate` and `password_generate_memorable` return plaintext because they generate a new secret for immediate use.
-- Item metadata tools always redact field values.
-- Environment variable reads always redact values.
-- `environment_reveal_variable` est désactivé par défaut comme `secret_reveal`.
-- `secret_reveal` is disabled by default.
-- Write tools are disabled unless `--enable-writes=true`.
-- Destructive tools are disabled unless `--enable-destructive-actions=true`.
-- Vault permission mutation tools are disabled unless `--enable-permission-mutation=true`.
-- `op_script_run` is disabled by default and only runs commands from startup-configured allowlists.
-- Every plaintext reveal and every mutating write emits a JSONL audit entry.
-- Reveal requires the literal acknowledgement string `I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT`.
+Les URI de ressources utilisent le schéma `onepassword://` plutôt que `1password://`. Le parser URL de Node.js rejette les schémas commençant par un chiffre, ce qui casse la lecture des ressources en pratique.
 
-## Notes on MCP resources
-
-- Resource URIs use the `onepassword://` scheme rather than `1password://`.
-- Reason: Node's URL parser rejects schemes that start with a digit, which breaks resource reads in practice.
-
-## Development
+## Développement
 
 ```bash
-npm run lint
-npm test
+npm run lint   # Vérification de types TypeScript
+npm test       # Suite de tests
+npm run build  # Compilation vers dist/
 ```
+
+Les commits doivent suivre [Conventional Commits](https://www.conventionalcommits.org/) — ce projet utilise [release-please](https://github.com/googleapis/release-please) pour automatiser la génération du CHANGELOG et les bumps de version.
+
+## Changelog
+
+Voir [CHANGELOG.md](./CHANGELOG.md).
+
+## Licence
+
+MIT
