@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { constants, readFileSync, realpathSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { ServerConfig } from "./config.js";
 
-export const SCRIPT_ALLOWLIST_FILENAME = ".onepassword-mcp-codex.json";
+export const SCRIPT_ALLOWLIST_FILENAME = ".onepassword-mcp.json";
 export const DEFAULT_SCRIPT_TIMEOUT_MS = 600_000;
 export const DEFAULT_PROCESS_TIMEOUT_MS = 30_000;
 export const DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024;
@@ -102,6 +102,7 @@ const commandSchema = z.object({
 const allowlistSchema = z.object({
   version: z.literal(1),
   workspaceRoot: z.string().min(1).optional(),
+  workspaceRoots: z.array(z.string().min(1)).optional(),
   commands: z.record(commandSchema),
 });
 
@@ -194,6 +195,15 @@ function isDeterministicOpAuthFailure(result: ProcessRunResult): boolean {
     );
 }
 
+function processFailureDetails(result: ProcessRunResult): string {
+  return (
+    result.stderr ||
+    result.stdout ||
+    result.errorMessage ||
+    `exitCode=${result.exitCode ?? "unknown"} signal=${result.signal ?? "none"} timedOut=${result.timedOut}`
+  );
+}
+
 function forceKillGraceMs(timeoutMs: number): number {
   return Math.min(FORCE_KILL_GRACE_MS, Math.max(50, Math.floor(timeoutMs / 2)));
 }
@@ -218,6 +228,40 @@ function createChildEnvironment(
     ...childEnv,
     ...env,
   };
+}
+
+function prependPathEntries(
+  env: NodeJS.ProcessEnv,
+  entries: string[],
+): NodeJS.ProcessEnv {
+  const normalizedEntries = entries.filter(Boolean);
+  const pathEntries =
+    env.PATH
+      ?.split(delimiter)
+      .filter((entry) => entry && !normalizedEntries.includes(entry)) ?? [];
+
+  for (const entry of normalizedEntries.slice().reverse()) {
+    if (pathEntries.includes(entry)) {
+      continue;
+    }
+    pathEntries.unshift(entry);
+  }
+
+  return {
+    ...env,
+    PATH: pathEntries.join(delimiter),
+  };
+}
+
+function createScriptEnvironment(
+  env: NodeJS.ProcessEnv,
+  commandPath: string,
+  opCliPath: string,
+): NodeJS.ProcessEnv {
+  return prependPathEntries(env, [
+    dirname(commandPath),
+    ...(isAbsolute(opCliPath) ? [dirname(opCliPath)] : []),
+  ]);
 }
 
 export class NodeProcessRunner implements ProcessRunner {
@@ -319,6 +363,10 @@ export class NodeProcessRunner implements ProcessRunner {
 export class OpCliSessionManager {
   private cachedSessionToken?: string;
   private desktopValidated = false;
+  private manualSessionTokenPromise?: Promise<{
+    token: string;
+    refreshedAuth: boolean;
+  }>;
 
   public constructor(
     private readonly config: ServerConfig,
@@ -344,6 +392,7 @@ export class OpCliSessionManager {
   public reset(): void {
     this.cachedSessionToken = undefined;
     this.desktopValidated = false;
+    this.manualSessionTokenPromise = undefined;
   }
 
   public redact(text: string): string {
@@ -388,7 +437,7 @@ export class OpCliSessionManager {
       };
     }
 
-    const session = await this.ensureManualSessionToken();
+    const session = await this.ensureManualSessionTokenLocked();
     return {
       mode,
       env: createChildEnvironment(mode, {
@@ -430,7 +479,7 @@ export class OpCliSessionManager {
 
     const result = await this.processRunner.run(
       this.config.opCliPath,
-      ["whoami", "--account", this.config.account!],
+      ["account", "get", "--account", this.config.account!, "--format", "json"],
       {
         env: createChildEnvironment("desktop", {
           OP_ACCOUNT: this.config.account!,
@@ -442,7 +491,7 @@ export class OpCliSessionManager {
 
     if (result.exitCode !== 0) {
       throw new Error(
-        `op whoami failed: ${this.redact(result.stderr || result.stdout || result.errorMessage || "unknown error")}`,
+        `op account get failed: ${this.redact(processFailureDetails(result))}`,
       );
     }
 
@@ -483,20 +532,30 @@ export class OpCliSessionManager {
     this.cachedSessionToken = token;
     return { token, refreshedAuth: hadCachedSession };
   }
+
+  private async ensureManualSessionTokenLocked(): Promise<{
+    token: string;
+    refreshedAuth: boolean;
+  }> {
+    if (!this.manualSessionTokenPromise) {
+      this.manualSessionTokenPromise = this.ensureManualSessionToken().finally(() => {
+        this.manualSessionTokenPromise = undefined;
+      });
+    }
+    return this.manualSessionTokenPromise;
+  }
 }
 
 export class DefaultOpScriptRunner implements OpScriptRunner {
-  private readonly allowlistsByWorkspaceRoot: Map<string, ScriptAllowlist>;
+  private readonly allowlistsByWorkspaceRoot: ScriptAllowlist[];
 
   public constructor(
     private readonly config: ServerConfig,
     private readonly sessionManager = new OpCliSessionManager(config),
     private readonly processRunner: ProcessRunner = new NodeProcessRunner(),
   ) {
-    this.allowlistsByWorkspaceRoot = new Map(
-      (config.enableScriptRunner ? loadConfiguredScriptAllowlists(config) : []).map(
-        (allowlist) => [allowlist.workspaceRoot, allowlist],
-      ),
+    this.allowlistsByWorkspaceRoot = (config.enableScriptRunner ? loadConfiguredScriptAllowlists(config) : []).sort(
+      (left, right) => right.workspaceRoot.length - left.workspaceRoot.length,
     );
   }
 
@@ -510,7 +569,9 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
 
   public async list(workspaceRoot: string): Promise<ScriptAllowlist> {
     const resolvedWorkspaceRoot = await realpath(workspaceRoot);
-    const allowlist = this.allowlistsByWorkspaceRoot.get(resolvedWorkspaceRoot);
+    const allowlist = this.allowlistsByWorkspaceRoot.find((candidate) =>
+      isPathInside(candidate.workspaceRoot, resolvedWorkspaceRoot),
+    );
     if (!allowlist) {
       throw new Error(
         `Workspace ${resolvedWorkspaceRoot} does not have a startup-configured script allowlist.`,
@@ -536,7 +597,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     const auth = await this.sessionManager.getEnvironment();
     const result = await this.processRunner.run(command.command, command.args, {
       cwd,
-      env: auth.env,
+      env: createScriptEnvironment(auth.env, command.command, this.config.opCliPath),
       timeoutMs: command.timeoutMs,
       maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
     });
@@ -558,6 +619,20 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
       refreshedAuth: auth.refreshedAuth,
     };
   }
+}
+
+function resolveWorkspaceRootsFromParsed(
+  allowlistPath: string,
+  parsed: z.infer<typeof allowlistSchema>,
+): string[] {
+  const entries = parsed.workspaceRoots?.length
+    ? parsed.workspaceRoots
+    : parsed.workspaceRoot
+      ? [parsed.workspaceRoot]
+      : ["."];
+
+  const base = dirname(allowlistPath);
+  return entries.map((root) => realpathSync(resolve(base, root)));
 }
 
 function scriptAllowlistFromParsed(
@@ -601,21 +676,22 @@ export function loadConfiguredScriptAllowlists(
     realpathSync(root),
   );
 
-  return config.scriptRunnerAllowlistPaths.map((allowlistPath) => {
+  return config.scriptRunnerAllowlistPaths.flatMap((allowlistPath) => {
     const resolvedAllowlistPath = realpathSync(allowlistPath);
     const raw = readFileSync(resolvedAllowlistPath, "utf8");
     const parsed = allowlistSchema.parse(JSON.parse(raw));
-    const workspaceRoot = realpathSync(
-      parsed.workspaceRoot
-        ? resolve(dirname(resolvedAllowlistPath), parsed.workspaceRoot)
-        : dirname(resolvedAllowlistPath),
+    const workspaceRoots = resolveWorkspaceRootsFromParsed(
+      resolvedAllowlistPath,
+      parsed,
     );
 
-    if (resolvedAllowedRoots.length > 0) {
-      assertWorkspaceRootAllowed(workspaceRoot, resolvedAllowedRoots);
-    }
+    return workspaceRoots.flatMap((workspaceRoot) => {
+      if (resolvedAllowedRoots.length > 0) {
+        assertWorkspaceRootAllowed(workspaceRoot, resolvedAllowedRoots);
+      }
 
-    return scriptAllowlistFromParsed(resolvedAllowlistPath, workspaceRoot, parsed);
+      return [scriptAllowlistFromParsed(resolvedAllowlistPath, workspaceRoot, parsed)];
+    });
   });
 }
 
