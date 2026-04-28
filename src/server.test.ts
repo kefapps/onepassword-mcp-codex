@@ -222,7 +222,7 @@ class FakeOnePasswordService implements OnePasswordService {
 class FakeOpScriptRunner implements OpScriptRunner {
   public resetCalls = 0;
   public readonly allowlist: ScriptAllowlist = {
-    path: "/workspace/.onepassword-mcp-codex.json",
+    path: "/workspace/.onepassword-mcp.json",
     workspaceRoot: "/workspace",
     commands: [
       {
@@ -306,10 +306,15 @@ async function createClientAndServer(
     enablePermissionMutation: options.enablePermissionMutation ?? false,
     enableScriptRunner: options.enableScriptRunner ?? false,
     scriptRunnerRoots: ["/workspace"],
-    scriptRunnerAllowlistPaths: ["/workspace/.onepassword-mcp-codex.json"],
+    scriptRunnerAllowlistPaths: ["/workspace/.onepassword-mcp.json"],
     opCliPath: "op",
     opCliAuthMode: "auto",
-    auditLogPath: "/tmp/onepassword-mcp-codex-test-audit.jsonl",
+    transport: "stdio",
+    httpHost: "127.0.0.1",
+    httpPort: 17337,
+    httpPath: "/mcp",
+    httpRequireBearer: false,
+    auditLogPath: "/tmp/onepassword-mcp-test-audit.jsonl",
     logLevel: "info",
     integrationName: "Test",
     integrationVersion: "0.1.0",
@@ -699,7 +704,7 @@ test("script runner lists and runs allowlisted commands with audit", async () =>
     arguments: {
       workspaceRoot: "/workspace",
       commandId: "deploy",
-      reason: "Need to deploy from Codex",
+      reason: "Need to run deploy from an MCP client",
     },
   });
   const textContent = run.content as Array<{ type: string; text?: string }>;

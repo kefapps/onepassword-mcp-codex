@@ -1,5 +1,6 @@
 export const SDK_CAPABILITIES = {
   supportedAuthModes: ["desktop", "service-account"],
+  supportedTransports: ["stdio", "http"],
   supportedTools: [
     "sdk_capabilities",
     "password_generate",
@@ -59,6 +60,7 @@ export const SDK_CAPABILITIES = {
     "Write, destructive, and permission mutation tools are separately gated behind startup flags.",
     "The allowlisted script runner is disabled unless the server starts with --enable-script-runner=true.",
     "The script runner only uses startup-configured --script-runner-allowlist files and withholds stdout/stderr by default.",
+    "HTTP transport is optional, binds to 127.0.0.1 by default, and requires OP_MCP_HTTP_BEARER_TOKEN unless explicitly disabled.",
     "Vault permission mutation is available only for group-based access because that is the surface exposed by the official JS SDK beta.",
     "1Password Environments are read-only at the moment because the official JS SDK beta only exposes variable retrieval.",
   ],

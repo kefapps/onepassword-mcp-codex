@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 export type AuthMode = "desktop" | "service-account";
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type OpCliAuthMode = "auto" | "desktop" | "manual-session" | "service-account";
+export type TransportMode = "stdio" | "http";
 
 export interface ServerConfig {
   authMode: AuthMode;
@@ -19,6 +20,12 @@ export interface ServerConfig {
   scriptRunnerAllowlistPaths: string[];
   opCliPath: string;
   opCliAuthMode: OpCliAuthMode;
+  transport: TransportMode;
+  httpHost: string;
+  httpPort: number;
+  httpPath: string;
+  httpRequireBearer: boolean;
+  httpBearerToken?: string;
   auditLogPath: string;
   logLevel: LogLevel;
   integrationName: string;
@@ -29,7 +36,7 @@ export class HelpError extends Error {}
 
 const DEFAULT_AUDIT_LOG_PATH = join(
   homedir(),
-  ".onepassword-mcp-codex",
+  ".onepassword-mcp",
   "audit.jsonl",
 );
 
@@ -133,6 +140,40 @@ function parseOpCliAuthMode(value: string | undefined): OpCliAuthMode {
   throw new Error(`Unsupported op CLI auth mode: ${value}`);
 }
 
+function parseTransportMode(value: string | undefined): TransportMode {
+  if (!value) {
+    return "stdio";
+  }
+
+  if (value === "stdio" || value === "http") {
+    return value;
+  }
+
+  throw new Error(`Unsupported transport: ${value}`);
+}
+
+function parseHttpPort(value: string | undefined): number {
+  if (!value) {
+    return 17337;
+  }
+
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    throw new Error(`Invalid HTTP port: ${value}`);
+  }
+  return port;
+}
+
+function parseHttpPath(value: string | undefined): string {
+  if (!value) {
+    return "/mcp";
+  }
+  if (!value.startsWith("/")) {
+    throw new Error(`HTTP path must start with /: ${value}`);
+  }
+  return value;
+}
+
 function resolveScriptRunnerAuthMode(
   authMode: AuthMode,
   opCliAuthMode: OpCliAuthMode,
@@ -159,7 +200,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
   if (argv.includes("-h") || hasFlag(argv, "help")) {
     throw new HelpError(
       [
-        "Usage: onepassword-mcp-codex [options]",
+        "Usage: mcp-1password [options]",
         "",
         "Options:",
         "  --auth-mode=desktop|service-account",
@@ -174,6 +215,11 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --script-runner-allowlist=<absolute allowlist file> (repeatable)",
         "  --op-cli-path=<path>",
         "  --op-cli-auth-mode=auto|desktop|manual-session|service-account",
+        "  --transport=stdio|http",
+        "  --http-host=<host>",
+        "  --http-port=<port>",
+        "  --http-path=<path>",
+        "  --http-require-bearer=true|false",
         "  --audit-log-path=<path>",
         "  --log-level=debug|info|warn|error",
       ].join("\n"),
@@ -248,6 +294,29 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
   const opCliAuthMode = parseOpCliAuthMode(
     readFlagValue(argv, "op-cli-auth-mode") ?? process.env.OP_MCP_OP_CLI_AUTH_MODE,
   );
+  const transport = parseTransportMode(
+    readFlagValue(argv, "transport") ?? process.env.OP_MCP_TRANSPORT,
+  );
+  const httpHost =
+    readFlagValue(argv, "http-host") ?? process.env.OP_MCP_HTTP_HOST ?? "127.0.0.1";
+  const httpPort = parseHttpPort(
+    readFlagValue(argv, "http-port") ?? process.env.OP_MCP_HTTP_PORT,
+  );
+  const httpPath = parseHttpPath(
+    readFlagValue(argv, "http-path") ?? process.env.OP_MCP_HTTP_PATH,
+  );
+  const httpRequireBearer = parseBoolean(
+    readFlagValue(argv, "http-require-bearer") ??
+      process.env.OP_MCP_HTTP_REQUIRE_BEARER,
+    transport === "http",
+  );
+  const httpBearerToken = process.env.OP_MCP_HTTP_BEARER_TOKEN;
+
+  if (transport === "http" && httpRequireBearer && !httpBearerToken) {
+    throw new Error(
+      "HTTP transport requires OP_MCP_HTTP_BEARER_TOKEN unless --http-require-bearer=false is set.",
+    );
+  }
 
   if (enableScriptRunner) {
     if (scriptRunnerAllowlistPaths.length === 0) {
@@ -306,11 +375,17 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     scriptRunnerAllowlistPaths,
     opCliPath,
     opCliAuthMode,
+    transport,
+    httpHost,
+    httpPort,
+    httpPath,
+    httpRequireBearer,
+    httpBearerToken,
     auditLogPath,
     logLevel: parseLogLevel(
       readFlagValue(argv, "log-level") ?? process.env.OP_MCP_LOG_LEVEL,
     ),
-    integrationName: "Codex 1Password MCP",
+    integrationName: "1Password MCP",
     integrationVersion: packageVersion,
   };
 }
