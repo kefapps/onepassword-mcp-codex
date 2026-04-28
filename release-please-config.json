@@ -12,6 +12,9 @@
         { "type": "deps", "section": "Dependencies", "hidden": true },
         { "type": "revert", "section": "Reverts" },
         { "type": "docs", "section": "Documentation", "hidden": false },
+        { "type": "refactor", "section": "Refactoring", "hidden": true },
+        { "type": "test", "section": "Tests", "hidden": true },
+        { "type": "ci", "section": "Continuous Integration", "hidden": true },
         { "type": "chore", "section": "Miscellaneous", "hidden": true }
       ]
     }
