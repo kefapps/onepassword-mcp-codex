@@ -195,6 +195,12 @@ The GitHub workflow uses Node.js 24 and has the `id-token: write` permission req
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request.
+
+Please report vulnerabilities privately instead of opening a public issue. See [SECURITY.md](./SECURITY.md).
+
 ## License
 
 MIT
