@@ -14,7 +14,7 @@ Un serveur [Model Context Protocol](https://modelcontextprotocol.io/) qui expose
 - Révéler les secrets en clair sur demande, avec acquittement explicite (`--enable-secret-reveal`)
 - Exécuter des scripts pré-approuvés avec auth 1Password CLI injectée (`--enable-script-runner`)
 - Transports : stdio (défaut) ou HTTP avec auth bearer token
-- Journal d'audit complet de toutes les actions sensibles (JSONL, `~/.local/share/mcp-1password/audit.jsonl`)
+- Journal d'audit complet de toutes les actions sensibles (JSONL, `~/.onepassword-mcp/audit.jsonl`)
 
 ## Prérequis
 
@@ -81,8 +81,7 @@ OP_MCP_HTTP_BEARER_TOKEN="$(openssl rand -base64 32)" \
 mcp-1password \
   --auth-mode=desktop \
   --account="Mon Compte" \
-  --transport=http \
-  --http-port=3010
+  --transport=http
 ```
 
 > **⚠ Sécurité — pas de TLS intégré :** Le transport HTTP utilise du HTTP en clair. Si vous liez le serveur à une interface autre que `127.0.0.1`, le bearer token transite en clair. Utilisez un reverse proxy avec terminaison TLS (nginx, Caddy, Traefik) pour toute exposition non-localhost.
@@ -107,10 +106,11 @@ Tous les flags peuvent aussi être définis via des variables d'environnement.
 | `--op-cli-auth-mode` | `OP_MCP_OP_CLI_AUTH_MODE` | `auto` | `auto`, `desktop`, `manual-session`, `service-account` |
 | `--transport` | `OP_MCP_TRANSPORT` | `stdio` | `stdio` ou `http` |
 | `--http-host` | `OP_MCP_HTTP_HOST` | `127.0.0.1` | Adresse de bind pour le transport HTTP |
-| `--http-port` | `OP_MCP_HTTP_PORT` | `3010` | Port pour le transport HTTP |
+| `--http-port` | `OP_MCP_HTTP_PORT` | `17337` | Port pour le transport HTTP |
 | `--http-path` | `OP_MCP_HTTP_PATH` | `/mcp` | Préfixe de chemin pour le transport HTTP |
 | `--http-require-bearer` | `OP_MCP_HTTP_REQUIRE_BEARER` | `true` si HTTP | Exiger l'en-tête `Authorization: Bearer` |
-| `--audit-log-path` | `OP_MCP_AUDIT_LOG_PATH` | `~/.local/share/mcp-1password/audit.jsonl` | Chemin du journal d'audit |
+| — | `OP_MCP_HTTP_BEARER_TOKEN` | — | Token bearer requis par défaut avec `--transport=http` |
+| `--audit-log-path` | `OP_MCP_AUDIT_LOG_PATH` | `~/.onepassword-mcp/audit.jsonl` | Chemin du journal d'audit |
 | `--log-level` | `OP_MCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## Script runner

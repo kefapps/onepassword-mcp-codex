@@ -20,7 +20,8 @@ Ce projet utilise [Conventional Commits](https://www.conventionalcommits.org/) e
 |---|---|---|---|
 | `feat` | **minor** (0.x.0) | ✅ Features | Nouvelle fonctionnalité exposée à l'utilisateur |
 | `fix` | **patch** (0.0.x) | ✅ Bug Fixes | Correction de bug |
-| `fix(security)` | **patch** | ✅ Security | Correctif de sécurité — utiliser ce scope systématiquement |
+| `fix(security)` | **patch** | ✅ Bug Fixes, scope `security` | Correctif de sécurité — utiliser ce scope systématiquement |
+| `security` | non garanti | ✅ Security | Réservé aux entrées de changelog manuelles/exceptionnelles ; préférer `fix(security):` pour garantir un patch |
 | `perf` | **patch** | ✅ Performance Improvements | Amélioration de performance mesurable |
 | `docs` | aucun | ✅ Documentation | Modifications de documentation uniquement |
 | `refactor` | aucun | ❌ (caché) | Refactoring sans changement de comportement |
@@ -37,7 +38,7 @@ Ce projet utilise [Conventional Commits](https://www.conventionalcommits.org/) e
 2. **Le scope est optionnel mais recommandé** pour les changements ciblés : `fix(http-server):`, `feat(script-runner):`, `fix(security):`.
 3. **Un commit = une intention.** Ne pas mélanger un fix et un refactoring dans le même commit.
 4. **Les commits de merge automatiques** (release-please, Dependabot) sont gérés par les bots — ne pas les imiter manuellement.
-5. **`fix(security):`** pour tout correctif lié à la sécurité, même mineur. Ce scope crée une section dédiée dans le CHANGELOG.
+5. **`fix(security):`** pour tout correctif lié à la sécurité, même mineur. Cela garantit un bump patch cohérent ; avec release-please, le scope `security` reste visible dans l'entrée du CHANGELOG même si la section reste `Bug Fixes`.
 
 ### Exemples corrects
 

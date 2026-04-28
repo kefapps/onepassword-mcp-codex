@@ -1,4 +1,4 @@
-# Security Review: onepassword-mcp-codex
+# Security Review: mcp-1password
 
 ## Executive Summary
 
@@ -25,12 +25,12 @@ Impact: A client that can point the MCP at an attacker-controlled directory can 
 Evidence:
 
 - `op_script_run` accepts any non-empty `workspaceRoot` string from the MCP client: `src/server.ts:347-354`.
-- The runner resolves and reads `.onepassword-mcp-codex.json` from that arbitrary path: `src/op-runner.ts:480-484`.
+- The runner resolves and reads `.onepassword-mcp.json` from that arbitrary path: `src/op-runner.ts:480-484`.
 - The selected command is then spawned with the authenticated environment: `src/op-runner.ts:440-447`.
 
 Risk:
 
-The allowlist protects against free-form command strings only if the allowlist file itself is trusted. In a Codex-style environment, the model often has filesystem write access through other tools; it could create or modify an allowlist and then call `op_script_run`.
+The allowlist protects against free-form command strings only if the allowlist file itself is trusted. In a delegated agent environment, if the model can write files through other tools, it could create or modify an allowlist and then call `op_script_run`.
 
 Recommended fix:
 
