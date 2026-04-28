@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
 import type { ServerConfig } from "./config.js";
 import {
@@ -30,7 +30,12 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     scriptRunnerAllowlistPaths: [],
     opCliPath: "op",
     opCliAuthMode: "auto",
-    auditLogPath: "/tmp/onepassword-mcp-codex-test-audit.jsonl",
+    transport: "stdio",
+    httpHost: "127.0.0.1",
+    httpPort: 17337,
+    httpPath: "/mcp",
+    httpRequireBearer: false,
+    auditLogPath: "/tmp/onepassword-mcp-test-audit.jsonl",
     logLevel: "info",
     integrationName: "Test",
     integrationVersion: "0.1.0",
@@ -132,6 +137,31 @@ test("loadConfiguredScriptAllowlists parses command defaults", async () => {
   assert.deepEqual(allowlist.commands[0]?.args, ["run", "deploy"]);
 });
 
+test("loadConfiguredScriptAllowlists supports multiple workspaceRoots in one allowlist", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    workspaceRoots: [".", "extra"],
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+        args: ["run", "deploy"],
+      },
+    },
+  });
+
+  await mkdir(`${workspace}/extra`, { recursive: true });
+
+  const allowlists = loadConfiguredScriptAllowlists(
+    createScriptRunnerConfig(workspace, {
+      scriptRunnerRoots: [workspace],
+    }),
+  );
+
+  assert.equal(allowlists.length, 2);
+  assert.equal(allowlists[0]?.commands[0]?.id, "deploy");
+  assert.equal(allowlists[1]?.commands[0]?.id, "deploy");
+});
+
 test("DefaultOpScriptRunner rejects cwd outside workspace", async () => {
   const workspace = await createWorkspace({
     version: 1,
@@ -230,6 +260,108 @@ test("DefaultOpScriptRunner uses startup-pinned allowlists", async () => {
   await assert.rejects(() => runner.run(workspace, "injected"), /not found/);
 });
 
+test("DefaultOpScriptRunner matches allowlist for nested workspace roots", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const nestedWorkspace = `${workspace}/subdir`;
+  await mkdir(nestedWorkspace, { recursive: true });
+
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "{}\n" }),
+    processResult({ stdout: "ok\n" }),
+  ]);
+  const config = createScriptRunnerConfig(workspace);
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const allowlist = await runner.list(nestedWorkspace);
+  const result = await runner.run(nestedWorkspace, "deploy");
+  const resolvedWorkspace = await realpath(workspace);
+  const commandCall = processRunner.calls.find((call) => call.command === TEST_COMMAND);
+
+  assert.equal(allowlist.workspaceRoot, resolvedWorkspace);
+  assert.equal(result.workspaceRoot, resolvedWorkspace);
+  assert.equal(commandCall?.cwd, resolvedWorkspace);
+});
+
+test("desktop auth validates the configured account and injects OP_ACCOUNT", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "{}\n" }),
+    processResult({ stdout: "ok\n" }),
+  ]);
+  const config = createScriptRunnerConfig(workspace, {
+    opCliAuthMode: "desktop",
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.run(workspace, "deploy");
+  const accountCall = processRunner.calls[0];
+  const commandCall = processRunner.calls.find(
+    (call) => call.command === TEST_COMMAND,
+  );
+
+  assert.deepEqual(accountCall?.args, [
+    "account",
+    "get",
+    "--account",
+    "TestAccount",
+    "--format",
+    "json",
+  ]);
+  assert.equal(result.authMode, "desktop");
+  assert.equal(result.stdout, "ok\n");
+  assert.equal(commandCall?.env?.OP_ACCOUNT, "TestAccount");
+  assert.equal(commandCall?.env?.OP_SESSION, undefined);
+});
+
+test("script run PATH includes allowlisted command and configured op directories", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "{}\n" }),
+    processResult({ stdout: "ok\n" }),
+  ]);
+  const config = createScriptRunnerConfig(workspace, {
+    opCliAuthMode: "desktop",
+    opCliPath: "/opt/homebrew/bin/op",
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  await runner.run(workspace, "deploy");
+
+  const commandCall = processRunner.calls.find(
+    (call) => call.command === TEST_COMMAND,
+  );
+  const pathEntries = commandCall?.env?.PATH?.split(delimiter) ?? [];
+
+  assert.equal(pathEntries[0], dirname(TEST_COMMAND));
+  assert.equal(pathEntries[1], "/opt/homebrew/bin");
+});
+
 test("manual-session auth refreshes expired cached OP_SESSION before running", async () => {
   const workspace = await createWorkspace({
     version: 1,
@@ -270,6 +402,28 @@ test("manual-session auth refreshes expired cached OP_SESSION before running", a
   assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
   assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-2");
   assert.equal(commandCalls[0]?.env?.OP_SERVICE_ACCOUNT_TOKEN, undefined);
+});
+
+test("manual-session auth coalesces concurrent signin refreshes", async () => {
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "session-token-1\n" }),
+  ]);
+  const config = createConfig({
+    opCliAuthMode: "manual-session",
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+
+  const [firstEnvironment, secondEnvironment] = await Promise.all([
+    sessionManager.getEnvironment(),
+    sessionManager.getEnvironment(),
+  ]);
+  const signinCalls = processRunner.calls.filter((call) =>
+    call.args.includes("signin"),
+  );
+
+  assert.equal(signinCalls.length, 1);
+  assert.equal(firstEnvironment.env.OP_SESSION, "session-token-1");
+  assert.equal(secondEnvironment.env.OP_SESSION, "session-token-1");
 });
 
 test("manual-session auth does not rerun failed scripts with auth-looking output", async () => {
