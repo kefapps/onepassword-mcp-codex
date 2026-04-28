@@ -1,46 +1,46 @@
-# Agent Instructions — mcp-1password
+# Agent Instructions - mcp-1password
 
-## Commits et versionnage
+## Commits And Versioning
 
-Ce projet utilise [Conventional Commits](https://www.conventionalcommits.org/) et [release-please](https://github.com/googleapis/release-please) pour automatiser le CHANGELOG et les bumps de version. **Chaque commit doit respecter ce format**, sans exception.
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [release-please](https://github.com/googleapis/release-please) to automate the CHANGELOG and version bumps. **Every commit must follow this format**, without exception.
 
 ### Format
 
 ```
-<type>(<scope optionnel>): <description courte>
+<type>(<optional scope>): <short description>
 
-<corps optionnel>
+<optional body>
 
-<footer optionnel>
+<optional footer>
 ```
 
-### Types et impact sur la version
+### Types And Version Impact
 
-| Type | Bump de version | Apparaît dans CHANGELOG | Usage |
+| Type | Version bump | Appears in CHANGELOG | Usage |
 |---|---|---|---|
-| `feat` | **minor** (0.x.0) | ✅ Features | Nouvelle fonctionnalité exposée à l'utilisateur |
-| `fix` | **patch** (0.0.x) | ✅ Bug Fixes | Correction de bug |
-| `fix(security)` | **patch** | ✅ Bug Fixes, scope `security` | Correctif de sécurité — utiliser ce scope systématiquement |
-| `security` | non garanti | ✅ Security | Réservé aux entrées de changelog manuelles/exceptionnelles ; préférer `fix(security):` pour garantir un patch |
-| `perf` | **patch** | ✅ Performance Improvements | Amélioration de performance mesurable |
-| `docs` | aucun | ✅ Documentation | Modifications de documentation uniquement |
-| `refactor` | aucun | ❌ (caché) | Refactoring sans changement de comportement |
-| `test` | aucun | ❌ (caché) | Ajout ou modification de tests uniquement |
-| `chore` | aucun | ❌ (caché) | Tâches de maintenance (build, config, dépendances) |
-| `ci` | aucun | ❌ (caché) | Modifications des workflows CI/CD |
-| `revert` | **patch** | ✅ Reverts | Annulation d'un commit précédent |
+| `feat` | **minor** (0.x.0) | Features | User-visible feature |
+| `fix` | **patch** (0.0.x) | Bug Fixes | Bug fix |
+| `fix(security)` | **patch** | Bug Fixes, `security` scope | Security fix; use this scope systematically |
+| `security` | not guaranteed | Security | Reserved for exceptional/manual changelog entries; prefer `fix(security):` to guarantee a patch bump |
+| `perf` | **patch** | Performance Improvements | Measurable performance improvement |
+| `docs` | none | Documentation | Documentation-only changes |
+| `refactor` | none | hidden | Refactor without behavior change |
+| `test` | none | hidden | Test-only changes |
+| `chore` | none | hidden | Maintenance work such as build, config, or dependencies |
+| `ci` | none | hidden | CI/CD workflow changes |
+| `revert` | **patch** | Reverts | Revert of a previous commit |
 
-**Breaking change → major (x.0.0) :** ajouter `!` après le type (`feat!:`, `fix!:`) ou un footer `BREAKING CHANGE: <description>`.
+**Breaking change -> major (x.0.0):** add `!` after the type (`feat!:`, `fix!:`) or add a footer `BREAKING CHANGE: <description>`.
 
-### Règles impératives
+### Mandatory Rules
 
-1. **Ne jamais utiliser de message générique.** Pas de `fix: bug`, `chore: update`, `feat: add feature`. La description doit être spécifique et tenir en une ligne.
-2. **Le scope est optionnel mais recommandé** pour les changements ciblés : `fix(http-server):`, `feat(script-runner):`, `fix(security):`.
-3. **Un commit = une intention.** Ne pas mélanger un fix et un refactoring dans le même commit.
-4. **Les commits de merge automatiques** (release-please, Dependabot) sont gérés par les bots — ne pas les imiter manuellement.
-5. **`fix(security):`** pour tout correctif lié à la sécurité, même mineur. Cela garantit un bump patch cohérent ; avec release-please, le scope `security` reste visible dans l'entrée du CHANGELOG même si la section reste `Bug Fixes`.
+1. **Never use generic messages.** Avoid `fix: bug`, `chore: update`, or `feat: add feature`. The description must be specific and fit on one line.
+2. **The scope is optional but recommended** for targeted changes: `fix(http-server):`, `feat(script-runner):`, `fix(security):`.
+3. **One commit = one intent.** Do not mix a fix and a refactor in the same commit.
+4. **Automatic merge commits** from release-please or Dependabot are bot-owned; do not imitate them manually.
+5. **Use `fix(security):`** for every security-related fix, even small ones. This guarantees a coherent patch bump; with release-please, the `security` scope remains visible in the CHANGELOG entry even if the section remains `Bug Fixes`.
 
-### Exemples corrects
+### Good Examples
 
 ```
 feat(script-runner): support multiple workspaceRoots in a single allowlist file
@@ -60,35 +60,36 @@ refactor(config): extract flag parsing helpers into dedicated functions
 perf(service): cache SDK client across requests to avoid reconnection overhead
 ```
 
-### Exemples incorrects
+### Bad Examples
 
 ```
-# ❌ trop vague
+# Too vague
 fix: bug fix
 feat: new feature
 update: stuff
 
-# ❌ mauvais type (le travail n'est pas documenté dans le bon CHANGELOG)
-chore: fix security issue   # → doit être fix(security):
-feat: update README         # → doit être docs:
+# Wrong type
+chore: fix security issue   # must be fix(security):
+feat: update README         # must be docs:
 
-# ❌ multiple intentions dans un commit
-feat: add vault search and fix pagination bug  # → deux commits séparés
+# Multiple intents in one commit
+feat: add vault search and fix pagination bug  # split into two commits
 ```
 
-## Pipeline de publication
+## Release Pipeline
 
-Le pipeline fonctionne ainsi :
+The pipeline works as follows:
 
-1. Les commits sur `main` déclenchent le workflow `release-please.yml`
-2. release-please analyse les commits depuis le dernier tag et crée/met à jour une PR `chore(release): vX.Y.Z`
-3. Merger cette PR crée un tag Git + une GitHub Release
-4. La GitHub Release déclenche `publish.yml` qui publie sur npm avec `--tag beta`
+1. Commits on `main` trigger the `release-please.yml` workflow.
+2. release-please analyzes commits since the last tag and creates or updates a `chore(release): vX.Y.Z` PR.
+3. Merging that PR creates a Git tag and GitHub Release.
+4. The GitHub Release triggers `publish.yml`, which publishes to npm through Trusted Publishing/OIDC with `--tag beta`.
 
-**Ne jamais bumper la version dans `package.json` manuellement.** C'est le rôle exclusif de release-please via sa PR de release.
+**Never bump the version in `package.json` manually.** That is exclusively handled by release-please through its release PR.
+**Never add a raw GitHub `NPM_TOKEN` secret or any long-lived npm token.** Nominal publication uses npm Trusted Publishing through the OIDC identity of the GitHub `publish.yml` workflow. The publish workflow must remain on a Node/npm version compatible with Trusted Publishing.
 
-## Périmètre des changements
+## Change Scope
 
-- Rester dans les fichiers pertinents pour la tâche. Ne pas reformatter ou refactorer du code non lié.
-- Ne pas modifier `CHANGELOG.md` directement — il est géré par release-please.
-- Ne pas modifier `.release-please-manifest.json` directement — il est mis à jour par release-please.
+- Stay within files relevant to the task. Do not reformat or refactor unrelated code.
+- Do not edit `CHANGELOG.md` directly; it is managed by release-please.
+- Do not edit `.release-please-manifest.json` directly; it is updated by release-please.
