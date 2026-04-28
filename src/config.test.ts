@@ -12,6 +12,10 @@ const ENV_KEYS = [
   "OP_MCP_HTTP_PORT",
   "OP_MCP_HTTP_PATH",
   "OP_MCP_HTTP_REQUIRE_BEARER",
+  "OP_MCP_HTTP_ALLOWED_ORIGINS",
+  "OP_MCP_HTTP_MAX_SESSIONS",
+  "OP_MCP_HTTP_SESSION_IDLE_MS",
+  "OP_MCP_HTTP_REQUEST_TIMEOUT_MS",
 ] as const;
 
 function withCleanAuthEnv(callback: () => void): void {
@@ -49,6 +53,10 @@ test("parseConfig keeps write and script runner gates disabled by default", () =
   assert.equal(config.httpPort, 17337);
   assert.equal(config.httpPath, "/mcp");
   assert.equal(config.httpRequireBearer, false);
+  assert.deepEqual(config.httpAllowedOrigins, []);
+  assert.equal(config.httpMaxSessions, 64);
+  assert.equal(config.httpSessionIdleMs, 15 * 60_000);
+  assert.equal(config.httpRequestTimeoutMs, 30_000);
 });
 
 test("parseConfig requires configured allowlists when script runner is enabled", () => {
@@ -179,7 +187,7 @@ test("parseConfig requires a bearer token for HTTP transport by default", () => 
 
 test("parseConfig accepts HTTP transport with bearer token", () => {
   withCleanAuthEnv(() => {
-    process.env.OP_MCP_HTTP_BEARER_TOKEN = "local-token";
+    process.env.OP_MCP_HTTP_BEARER_TOKEN = "local-token-123456";
     const config = parseConfig(
       [
         "--account",
@@ -188,6 +196,10 @@ test("parseConfig accepts HTTP transport with bearer token", () => {
         "--http-host=127.0.0.1",
         "--http-port=18080",
         "--http-path=/onepassword",
+        "--http-allowed-origin=http://127.0.0.1:18080",
+        "--http-max-sessions=8",
+        "--http-session-idle-ms=60000",
+        "--http-request-timeout-ms=5000",
       ],
       "0.1.0",
     );
@@ -197,7 +209,11 @@ test("parseConfig accepts HTTP transport with bearer token", () => {
     assert.equal(config.httpPort, 18080);
     assert.equal(config.httpPath, "/onepassword");
     assert.equal(config.httpRequireBearer, true);
-    assert.equal(config.httpBearerToken, "local-token");
+    assert.equal(config.httpBearerToken, "local-token-123456");
+    assert.deepEqual(config.httpAllowedOrigins, ["http://127.0.0.1:18080"]);
+    assert.equal(config.httpMaxSessions, 8);
+    assert.equal(config.httpSessionIdleMs, 60_000);
+    assert.equal(config.httpRequestTimeoutMs, 5_000);
   });
 });
 
@@ -216,6 +232,33 @@ test("parseConfig can disable HTTP bearer requirement explicitly", () => {
     assert.equal(config.transport, "http");
     assert.equal(config.httpRequireBearer, false);
     assert.equal(config.httpBearerToken, undefined);
+  });
+});
+
+test("parseConfig rejects short HTTP bearer tokens and unauthenticated non-localhost binds", () => {
+  withCleanAuthEnv(() => {
+    process.env.OP_MCP_HTTP_BEARER_TOKEN = "short";
+    assert.throws(
+      () => parseConfig(["--account", "TestAccount", "--transport=http"], "0.1.0"),
+      /at least 16 characters/,
+    );
+  });
+
+  withCleanAuthEnv(() => {
+    assert.throws(
+      () =>
+        parseConfig(
+          [
+            "--account",
+            "TestAccount",
+            "--transport=http",
+            "--http-host=0.0.0.0",
+            "--http-require-bearer=false",
+          ],
+          "0.1.0",
+        ),
+      /localhost/,
+    );
   });
 });
 
@@ -239,6 +282,14 @@ test("parseConfig validates HTTP transport settings", () => {
         "0.1.0",
       ),
     /HTTP path must start/,
+  );
+  assert.throws(
+    () =>
+      parseConfig(
+        ["--account", "TestAccount", "--http-max-sessions=0"],
+        "0.1.0",
+      ),
+    /Invalid HTTP max sessions/,
   );
 });
 

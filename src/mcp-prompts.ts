@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SECRET_REVEAL_ACK } from "./constants.js";
+import { GENERATED_SECRET_ACK, SECRET_REVEAL_ACK } from "./constants.js";
 
 function userPrompt(text: string) {
   return {
@@ -37,7 +37,7 @@ export function registerOnePasswordPrompts(server: McpServer): void {
             ? `Target item: vaultId=\`${vaultId}\`, itemId=\`${itemId}\`.`
             : "If the target item is unknown, start by using `vault_list` and `item_search` to identify it.",
           `Use \`password_read\` with \`reveal=false\`${field ? ` and \`field=${field}\`` : ""} to inspect the current password field without exposing plaintext.`,
-          "Generate a replacement with `password_generate` or `password_generate_memorable`.",
+          `Generate a replacement with \`password_generate\` or \`password_generate_memorable\`, including a concrete \`reason\` and the acknowledgement string \`${GENERATED_SECRET_ACK}\`.`,
           `Write the new credential with \`password_update\`${field ? ` targeting field \`${field}\`` : ""}.`,
           `Only if plaintext is explicitly required, call \`password_read\` with \`reveal=true\`, a concrete \`reason\`, and the acknowledgement string \`${SECRET_REVEAL_ACK}\`.`,
           "Keep the response focused on what changed, where it was stored, and whether any plaintext reveal happened.",
@@ -115,6 +115,7 @@ export function registerOnePasswordPrompts(server: McpServer): void {
           memorable
             ? "Use `password_generate_memorable` unless the user changes the requirement."
             : "Use `password_generate` unless the user explicitly prefers a memorable passphrase.",
+          `Generated passwords are returned in plaintext, so include a concrete \`reason\` and the acknowledgement string \`${GENERATED_SECRET_ACK}\`.`,
           "Explain the tradeoff briefly: random passwords maximize entropy density; memorable passphrases are easier to type correctly.",
           vaultId && title
             ? `After generation, store it with \`password_create\` in vault \`${vaultId}\` with title \`${title}\`, unless the user wants generation-only.`

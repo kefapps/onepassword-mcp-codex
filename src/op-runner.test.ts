@@ -35,6 +35,10 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     httpPort: 17337,
     httpPath: "/mcp",
     httpRequireBearer: false,
+    httpAllowedOrigins: [],
+    httpMaxSessions: 64,
+    httpSessionIdleMs: 15 * 60_000,
+    httpRequestTimeoutMs: 30_000,
     auditLogPath: "/tmp/onepassword-mcp-test-audit.jsonl",
     logLevel: "info",
     integrationName: "Test",
@@ -330,7 +334,7 @@ test("desktop auth validates the configured account and injects OP_ACCOUNT", asy
   assert.equal(commandCall?.env?.OP_SESSION, undefined);
 });
 
-test("script run PATH includes allowlisted command and configured op directories", async () => {
+test("script run PATH includes configured op directory without command directory prepend", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -358,8 +362,8 @@ test("script run PATH includes allowlisted command and configured op directories
   );
   const pathEntries = commandCall?.env?.PATH?.split(delimiter) ?? [];
 
-  assert.equal(pathEntries[0], dirname(TEST_COMMAND));
-  assert.equal(pathEntries[1], "/opt/homebrew/bin");
+  assert.equal(pathEntries[0], "/opt/homebrew/bin");
+  assert.notEqual(pathEntries[0], dirname(TEST_COMMAND));
 });
 
 test("manual-session auth refreshes expired cached OP_SESSION before running", async () => {

@@ -66,8 +66,8 @@ export interface OpSessionStatus {
   enabled: boolean;
   authMode: ResolvedOpCliAuthMode;
   configuredAuthMode: ServerConfig["opCliAuthMode"];
-  account?: string;
-  opCliPath: string;
+  accountConfigured: boolean;
+  opCliPathConfigured: boolean;
   hasCachedSession: boolean;
   desktopValidated: boolean;
 }
@@ -255,13 +255,9 @@ function prependPathEntries(
 
 function createScriptEnvironment(
   env: NodeJS.ProcessEnv,
-  commandPath: string,
   opCliPath: string,
 ): NodeJS.ProcessEnv {
-  return prependPathEntries(env, [
-    dirname(commandPath),
-    ...(isAbsolute(opCliPath) ? [dirname(opCliPath)] : []),
-  ]);
+  return prependPathEntries(env, isAbsolute(opCliPath) ? [dirname(opCliPath)] : []);
 }
 
 export class NodeProcessRunner implements ProcessRunner {
@@ -382,8 +378,8 @@ export class OpCliSessionManager {
       enabled: this.config.enableScriptRunner,
       authMode: this.resolvedAuthMode,
       configuredAuthMode: this.config.opCliAuthMode,
-      account: this.config.account,
-      opCliPath: this.config.opCliPath,
+      accountConfigured: Boolean(this.config.account),
+      opCliPathConfigured: Boolean(this.config.opCliPath),
       hasCachedSession: Boolean(this.cachedSessionToken),
       desktopValidated: this.desktopValidated,
     };
@@ -597,7 +593,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     const auth = await this.sessionManager.getEnvironment();
     const result = await this.processRunner.run(command.command, command.args, {
       cwd,
-      env: createScriptEnvironment(auth.env, command.command, this.config.opCliPath),
+      env: createScriptEnvironment(auth.env, this.config.opCliPath),
       timeoutMs: command.timeoutMs,
       maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
     });

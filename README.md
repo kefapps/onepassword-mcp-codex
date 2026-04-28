@@ -12,8 +12,9 @@ Un serveur [Model Context Protocol](https://modelcontextprotocol.io/) qui expose
 - Créer, mettre à jour, archiver, et supprimer items et coffres (`--enable-writes`, `--enable-destructive-actions`)
 - Gérer les permissions de groupe sur les coffres (`--enable-permission-mutation`)
 - Révéler les secrets en clair sur demande, avec acquittement explicite (`--enable-secret-reveal`)
+- Générer des mots de passe en clair uniquement avec raison et acquittement explicite
 - Exécuter des scripts pré-approuvés avec auth 1Password CLI injectée (`--enable-script-runner`)
-- Transports : stdio (défaut) ou HTTP avec auth bearer token
+- Transports : stdio (défaut) ou HTTP local/single-user avec auth bearer token
 - Journal d'audit complet de toutes les actions sensibles (JSONL, `~/.onepassword-mcp/audit.jsonl`)
 
 ## Prérequis
@@ -84,7 +85,7 @@ mcp-1password \
   --transport=http
 ```
 
-> **⚠ Sécurité — pas de TLS intégré :** Le transport HTTP utilise du HTTP en clair. Si vous liez le serveur à une interface autre que `127.0.0.1`, le bearer token transite en clair. Utilisez un reverse proxy avec terminaison TLS (nginx, Caddy, Traefik) pour toute exposition non-localhost.
+> **⚠ Sécurité HTTP :** le transport HTTP est conçu pour un usage local/single-user. Le bearer token doit faire au moins 16 caractères et `--http-require-bearer=false` n'est autorisé que sur localhost. Si vous liez le serveur à une interface autre que `127.0.0.1`, utilisez un reverse proxy avec terminaison TLS (nginx, Caddy, Traefik). Pour un usage multi-utilisateur ou public, ajoutez une vraie couche d'autorisation en amont (OIDC/OAuth, identité client, scopes, expiration).
 
 ## Référence de configuration
 
@@ -109,7 +110,11 @@ Tous les flags peuvent aussi être définis via des variables d'environnement.
 | `--http-port` | `OP_MCP_HTTP_PORT` | `17337` | Port pour le transport HTTP |
 | `--http-path` | `OP_MCP_HTTP_PATH` | `/mcp` | Préfixe de chemin pour le transport HTTP |
 | `--http-require-bearer` | `OP_MCP_HTTP_REQUIRE_BEARER` | `true` si HTTP | Exiger l'en-tête `Authorization: Bearer` |
-| — | `OP_MCP_HTTP_BEARER_TOKEN` | — | Token bearer requis par défaut avec `--transport=http` |
+| — | `OP_MCP_HTTP_BEARER_TOKEN` | — | Token bearer requis par défaut avec `--transport=http` (16 caractères minimum) |
+| `--http-allowed-origin` | `OP_MCP_HTTP_ALLOWED_ORIGINS` | Origines localhost du port courant | Origines navigateur autorisées pour le transport HTTP (`Origin` strict, flag répétable, env séparé par virgules) |
+| `--http-max-sessions` | `OP_MCP_HTTP_MAX_SESSIONS` | `64` | Nombre maximum de sessions MCP HTTP actives |
+| `--http-session-idle-ms` | `OP_MCP_HTTP_SESSION_IDLE_MS` | `900000` | Expiration d'une session HTTP inactive |
+| `--http-request-timeout-ms` | `OP_MCP_HTTP_REQUEST_TIMEOUT_MS` | `30000` | Timeout des requêtes HTTP |
 | `--audit-log-path` | `OP_MCP_AUDIT_LOG_PATH` | `~/.onepassword-mcp/audit.jsonl` | Chemin du journal d'audit |
 | `--log-level` | `OP_MCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
@@ -139,17 +144,21 @@ Créer un fichier `.onepassword-mcp.json` à la racine de votre projet :
 ```
 
 - `command` doit être un **chemin absolu** vers un exécutable
+- Le répertoire de `command` n'est pas ajouté automatiquement au `PATH`. Utilisez des chemins absolus dans vos scripts, ou configurez `--op-cli-path` pour que le répertoire de `op` soit injecté.
 - `sensitiveOutput: true` empêche stdout/stderr d'être retournés à l'agent, sauf si `returnOutput=true` est explicitement demandé avec l'acquittement de révélation
 
 ## Modèle de sécurité
 
 - **Secrets opaques par défaut.** Tous les champs d'items sont retournés avec `valueState: "redacted"` sauf si `--enable-secret-reveal=true` est passé.
 - **La révélation en clair requiert un consentement explicite.** Les outils qui retournent des secrets nécessitent `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT"`.
+- **Les générateurs de mots de passe retournent un nouveau secret en clair.** Ils nécessitent `reason` et `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_GENERATED_SECRET_PLAINTEXT"`, et journalisent l'action sans journaliser le secret.
+- **Les actions destructives et mutations de permissions exigent un acquittement par appel.** Utiliser `acknowledgeDestructive: "I_UNDERSTAND_THIS_CAN_DELETE_1PASSWORD_DATA"` pour archive/suppression et `acknowledgePermissionMutation: "I_UNDERSTAND_THIS_CAN_CHANGE_1PASSWORD_PERMISSIONS"` pour les permissions.
 - **Toutes les capacités dangereuses sont opt-in et désactivées par défaut** (écriture, actions destructives, mutation de permissions, révélation de secrets, script runner).
 - **Chaque action sensible est journalisée** dans un fichier JSONL. Les références de secrets et tokens d'auth sont automatiquement redactés des logs.
 - **Le script runner utilise `spawn` avec `shell: false`** — aucune injection shell n'est possible. Les commandes doivent être allowlistées et utiliser des chemins absolus.
 - **La comparaison du bearer token utilise `crypto.timingSafeEqual`** pour prévenir les attaques temporelles.
-- **Le transport HTTP se bind sur localhost (`127.0.0.1`) par défaut.** Un bind non-localhost émet un warning TLS au démarrage.
+- **Le transport HTTP se bind sur localhost (`127.0.0.1`) par défaut.** Il valide l'en-tête `Origin`, limite les sessions actives, expire les sessions inactives, et retourne des erreurs génériques pour les erreurs serveur.
+- **Les ressources et capabilities évitent les détails locaux sensibles.** Les chemins locaux, compte 1Password, host/port HTTP et chemin du binaire `op` ne sont pas exposés aux clients MCP.
 - **`errorMessage` des scripts avec `sensitiveOutput: true` est retenu** sauf si `returnOutput=true` est explicitement demandé.
 
 ## Notes sur les ressources MCP
