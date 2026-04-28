@@ -13,8 +13,19 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          node-version: "20"
+
+      - name: Create or update release PR
+        run: >
+          npx --yes release-please@17.6.0 release-pr
+          --repo-url="${GITHUB_REPOSITORY}"
+          --target-branch=main
+          --token="${GITHUB_TOKEN}"
+          --config-file=release-please-config.json
+          --manifest-file=.release-please-manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
