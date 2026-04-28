@@ -19,6 +19,17 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Create GitHub release from merged release PR
+        run: >
+          npx --yes release-please@17.6.0 github-release
+          --repo-url="${GITHUB_REPOSITORY}"
+          --target-branch=main
+          --token="${GITHUB_TOKEN}"
+          --config-file=release-please-config.json
+          --manifest-file=.release-please-manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create or update release PR
         run: >
           npx --yes release-please@17.6.0 release-pr
