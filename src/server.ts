@@ -18,7 +18,12 @@ import { z } from "zod";
 import type { AuditLogger } from "./audit.js";
 import { SDK_CAPABILITIES } from "./capabilities.js";
 import type { ServerConfig } from "./config.js";
-import { SECRET_REVEAL_ACK } from "./constants.js";
+import {
+  DESTRUCTIVE_ACTION_ACK,
+  GENERATED_SECRET_ACK,
+  PERMISSION_MUTATION_ACK,
+  SECRET_REVEAL_ACK,
+} from "./constants.js";
 import { registerOnePasswordPrompts } from "./mcp-prompts.js";
 import { registerOnePasswordResources } from "./mcp-resources.js";
 import { DefaultOpScriptRunner, type OpScriptRunner } from "./op-runner.js";
@@ -416,10 +421,12 @@ export function createOnePasswordMcpServer(
         permissionMutationEnabled: config.enablePermissionMutation,
         scriptRunnerEnabled: config.enableScriptRunner,
         transport: config.transport,
-        httpHost: config.httpHost,
-        httpPort: config.httpPort,
         httpPath: config.httpPath,
         httpRequireBearer: config.httpRequireBearer,
+        httpAllowedOriginCount: config.httpAllowedOrigins.length,
+        httpMaxSessions: config.httpMaxSessions,
+        httpSessionIdleMs: config.httpSessionIdleMs,
+        httpRequestTimeoutMs: config.httpRequestTimeoutMs,
         ...SDK_CAPABILITIES,
       }),
   );
@@ -546,7 +553,7 @@ export function createOnePasswordMcpServer(
     "password_generate",
     {
       description:
-        "Generate a strong random password and return it in plaintext for immediate use.",
+        "Generate a strong random password and return it in plaintext for immediate use. Requires a reason and generated-secret acknowledgement.",
       inputSchema: {
         length: z.number().int().min(8).max(256).optional(),
         includeLowercase: z.boolean().optional(),
@@ -555,15 +562,33 @@ export function createOnePasswordMcpServer(
         includeSymbols: z.boolean().optional(),
         excludeSimilar: z.boolean().optional(),
         symbols: z.string().min(1).optional(),
+        reason: z.string().min(3),
+        acknowledgePlaintext: z.literal(GENERATED_SECRET_ACK),
       },
     },
     async (args) => {
-      const password = generateRandomPassword(args);
-      return textResult(password, {
-        generated: true,
-        kind: "random-password",
-        valueLength: password.length,
-      });
+      try {
+        const password = generateRandomPassword(args);
+        recordAudit(auditLogger, "password_generate", "success", {
+          kind: "random-password",
+          valueLength: password.length,
+          reason: args.reason,
+        });
+        return textResult(password, {
+          generated: true,
+          kind: "random-password",
+          valueLength: password.length,
+        });
+      } catch (error) {
+        recordAudit(
+          auditLogger,
+          "password_generate",
+          "error",
+          { kind: "random-password", reason: args.reason },
+          String(error),
+        );
+        throw error;
+      }
     },
   );
 
@@ -571,26 +596,44 @@ export function createOnePasswordMcpServer(
     "password_generate_memorable",
     {
       description:
-        "Generate a memorable passphrase-like password and return it in plaintext for immediate use.",
+        "Generate a memorable passphrase-like password and return it in plaintext for immediate use. Requires a reason and generated-secret acknowledgement.",
       inputSchema: {
         words: z.number().int().min(3).max(12).optional(),
         separator: z.string().max(8).optional(),
         capitalize: z.boolean().optional(),
         includeNumber: z.boolean().optional(),
+        reason: z.string().min(3),
+        acknowledgePlaintext: z.literal(GENERATED_SECRET_ACK),
       },
     },
-    async ({ words, separator, capitalize, includeNumber }) => {
-      const password = generateMemorablePassword({
-        words,
-        separator,
-        capitalize,
-        includeNumber,
-      });
-      return textResult(password, {
-        generated: true,
-        kind: "memorable-password",
-        valueLength: password.length,
-      });
+    async ({ words, separator, capitalize, includeNumber, reason }) => {
+      try {
+        const password = generateMemorablePassword({
+          words,
+          separator,
+          capitalize,
+          includeNumber,
+        });
+        recordAudit(auditLogger, "password_generate_memorable", "success", {
+          kind: "memorable-password",
+          valueLength: password.length,
+          reason,
+        });
+        return textResult(password, {
+          generated: true,
+          kind: "memorable-password",
+          valueLength: password.length,
+        });
+      } catch (error) {
+        recordAudit(
+          auditLogger,
+          "password_generate_memorable",
+          "error",
+          { kind: "memorable-password", reason },
+          String(error),
+        );
+        throw error;
+      }
     },
   );
 
@@ -977,18 +1020,20 @@ export function createOnePasswordMcpServer(
     server.registerTool(
       "vault_delete",
     {
-      description: "Delete a vault by ID.",
+      description: "Delete a vault by ID. Requires a reason and destructive-action acknowledgement.",
       inputSchema: {
         vaultId: z.string().min(1),
+        reason: z.string().min(3),
+        acknowledgeDestructive: z.literal(DESTRUCTIVE_ACTION_ACK),
       },
     },
-    async ({ vaultId }) => {
+    async ({ vaultId, reason }) => {
       try {
         await service.vaultDelete(vaultId);
-        recordAudit(auditLogger, "vault_delete", "success", { vaultId });
+        recordAudit(auditLogger, "vault_delete", "success", { vaultId, reason });
         return jsonResult({ deleted: true, vaultId });
       } catch (error) {
-        recordAudit(auditLogger, "vault_delete", "error", { vaultId }, String(error));
+        recordAudit(auditLogger, "vault_delete", "error", { vaultId, reason }, String(error));
         throw error;
       }
     },
@@ -1035,14 +1080,16 @@ export function createOnePasswordMcpServer(
     server.registerTool(
       "vault_permissions_grant_group",
     {
-      description: "Grant group permissions on a vault.",
+      description: "Grant group permissions on a vault. Requires a reason and permission-mutation acknowledgement.",
       inputSchema: {
         vaultId: z.string().min(1),
         groupId: z.string().min(1),
         permissions: z.array(permissionNameSchema).min(1),
+        reason: z.string().min(3),
+        acknowledgePermissionMutation: z.literal(PERMISSION_MUTATION_ACK),
       },
     },
-    async ({ vaultId, groupId, permissions }) => {
+    async ({ vaultId, groupId, permissions, reason }) => {
       const payload: GroupAccess[] = [
         {
           groupId,
@@ -1056,6 +1103,7 @@ export function createOnePasswordMcpServer(
           vaultId,
           groupId,
           permissions,
+          reason,
         });
         return jsonResult({
           granted: true,
@@ -1068,7 +1116,7 @@ export function createOnePasswordMcpServer(
           auditLogger,
           "vault_permissions_grant_group",
           "error",
-          { vaultId, groupId, permissions },
+          { vaultId, groupId, permissions, reason },
           String(error),
         );
         throw error;
@@ -1079,14 +1127,16 @@ export function createOnePasswordMcpServer(
     server.registerTool(
       "vault_permissions_update_group",
     {
-      description: "Replace a group's permissions on a vault.",
+      description: "Replace a group's permissions on a vault. Requires a reason and permission-mutation acknowledgement.",
       inputSchema: {
         vaultId: z.string().min(1),
         groupId: z.string().min(1),
         permissions: z.array(permissionNameSchema).min(1),
+        reason: z.string().min(3),
+        acknowledgePermissionMutation: z.literal(PERMISSION_MUTATION_ACK),
       },
     },
-    async ({ vaultId, groupId, permissions }) => {
+    async ({ vaultId, groupId, permissions, reason }) => {
       const payload: GroupVaultAccess[] = [
         {
           vaultId,
@@ -1101,6 +1151,7 @@ export function createOnePasswordMcpServer(
           vaultId,
           groupId,
           permissions,
+          reason,
         });
         return jsonResult({
           updated: true,
@@ -1113,7 +1164,7 @@ export function createOnePasswordMcpServer(
           auditLogger,
           "vault_permissions_update_group",
           "error",
-          { vaultId, groupId, permissions },
+          { vaultId, groupId, permissions, reason },
           String(error),
         );
         throw error;
@@ -1124,18 +1175,21 @@ export function createOnePasswordMcpServer(
     server.registerTool(
       "vault_permissions_revoke_group",
     {
-      description: "Revoke all group permissions from a vault.",
+      description: "Revoke all group permissions from a vault. Requires a reason and permission-mutation acknowledgement.",
       inputSchema: {
         vaultId: z.string().min(1),
         groupId: z.string().min(1),
+        reason: z.string().min(3),
+        acknowledgePermissionMutation: z.literal(PERMISSION_MUTATION_ACK),
       },
     },
-    async ({ vaultId, groupId }) => {
+    async ({ vaultId, groupId, reason }) => {
       try {
         await service.vaultRevokeGroupPermissions(vaultId, groupId);
         recordAudit(auditLogger, "vault_permissions_revoke_group", "success", {
           vaultId,
           groupId,
+          reason,
         });
         return jsonResult({
           revoked: true,
@@ -1147,7 +1201,7 @@ export function createOnePasswordMcpServer(
           auditLogger,
           "vault_permissions_revoke_group",
           "error",
-          { vaultId, groupId },
+          { vaultId, groupId, reason },
           String(error),
         );
         throw error;
@@ -1310,23 +1364,25 @@ export function createOnePasswordMcpServer(
     server.registerTool(
       "item_archive",
     {
-      description: "Archive an item.",
+      description: "Archive an item. Requires a reason and destructive-action acknowledgement.",
       inputSchema: {
         vaultId: z.string().min(1),
         itemId: z.string().min(1),
+        reason: z.string().min(3),
+        acknowledgeDestructive: z.literal(DESTRUCTIVE_ACTION_ACK),
       },
     },
-    async ({ vaultId, itemId }) => {
+    async ({ vaultId, itemId, reason }) => {
       try {
         await service.itemArchive(vaultId, itemId);
-        recordAudit(auditLogger, "item_archive", "success", { vaultId, itemId });
+        recordAudit(auditLogger, "item_archive", "success", { vaultId, itemId, reason });
         return jsonResult({ archived: true, vaultId, itemId });
       } catch (error) {
         recordAudit(
           auditLogger,
           "item_archive",
           "error",
-          { vaultId, itemId },
+          { vaultId, itemId, reason },
           String(error),
         );
         throw error;
@@ -1337,23 +1393,25 @@ export function createOnePasswordMcpServer(
     server.registerTool(
       "item_delete",
     {
-      description: "Delete an item.",
+      description: "Delete an item. Requires a reason and destructive-action acknowledgement.",
       inputSchema: {
         vaultId: z.string().min(1),
         itemId: z.string().min(1),
+        reason: z.string().min(3),
+        acknowledgeDestructive: z.literal(DESTRUCTIVE_ACTION_ACK),
       },
     },
-    async ({ vaultId, itemId }) => {
+    async ({ vaultId, itemId, reason }) => {
       try {
         await service.itemDelete(vaultId, itemId);
-        recordAudit(auditLogger, "item_delete", "success", { vaultId, itemId });
+        recordAudit(auditLogger, "item_delete", "success", { vaultId, itemId, reason });
         return jsonResult({ deleted: true, vaultId, itemId });
       } catch (error) {
         recordAudit(
           auditLogger,
           "item_delete",
           "error",
-          { vaultId, itemId },
+          { vaultId, itemId, reason },
           String(error),
         );
         throw error;

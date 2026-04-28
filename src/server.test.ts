@@ -25,6 +25,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { MemoryAuditLogger } from "./audit.js";
 import type { ServerConfig } from "./config.js";
+import {
+  DESTRUCTIVE_ACTION_ACK,
+  GENERATED_SECRET_ACK,
+  PERMISSION_MUTATION_ACK,
+  SECRET_REVEAL_ACK,
+} from "./constants.js";
 import type { OpScriptRunner, OpSessionStatus, ScriptAllowlist } from "./op-runner.js";
 import { createOnePasswordMcpServer } from "./server.js";
 import type { OnePasswordService } from "./service.js";
@@ -275,8 +281,8 @@ class FakeOpScriptRunner implements OpScriptRunner {
       enabled: true,
       authMode: "manual-session",
       configuredAuthMode: "auto",
-      account: "TestAccount",
-      opCliPath: "op",
+      accountConfigured: true,
+      opCliPathConfigured: true,
       hasCachedSession: true,
       desktopValidated: false,
     };
@@ -314,6 +320,10 @@ async function createClientAndServer(
     httpPort: 17337,
     httpPath: "/mcp",
     httpRequireBearer: false,
+    httpAllowedOrigins: [],
+    httpMaxSessions: 64,
+    httpSessionIdleMs: 15 * 60_000,
+    httpRequestTimeoutMs: 30_000,
     auditLogPath: "/tmp/onepassword-mcp-test-audit.jsonl",
     logLevel: "info",
     integrationName: "Test",
@@ -522,12 +532,23 @@ test("password read reveal succeeds and audits when enabled", async () => {
 });
 
 test("password generators return plaintext values", async () => {
-  const { client } = await createClientAndServer();
+  const { client, auditLogger } = await createClientAndServer();
+  const missingAck = await client.callTool({
+    name: "password_generate",
+    arguments: {
+      length: 20,
+      includeSymbols: false,
+    },
+  });
+  assert.equal(missingAck.isError, true);
+
   const randomResult = await client.callTool({
     name: "password_generate",
     arguments: {
       length: 20,
       includeSymbols: false,
+      reason: "Need a generated password for a test item",
+      acknowledgePlaintext: GENERATED_SECRET_ACK,
     },
   });
   const memorableResult = await client.callTool({
@@ -536,6 +557,8 @@ test("password generators return plaintext values", async () => {
       words: 4,
       separator: ".",
       includeNumber: false,
+      reason: "Need a memorable generated password for a test item",
+      acknowledgePlaintext: GENERATED_SECRET_ACK,
     },
   });
 
@@ -544,6 +567,8 @@ test("password generators return plaintext values", async () => {
     (memorableResult.content as Array<{ text?: string }>)[0]?.text ?? "";
   assert.equal(randomText.length, 20);
   assert.match(memorableText, /\./);
+  assert.equal(auditLogger.events.at(-2)?.action, "password_generate");
+  assert.equal(auditLogger.events.at(-1)?.action, "password_generate_memorable");
 });
 
 test("password create stores a generated secret and returns redacted metadata", async () => {
@@ -605,6 +630,71 @@ test("password update can replace a field with a provided password", async () =>
   assert.equal(payload.passwordSource, "provided");
   assert.equal(findPasswordValue(service.item, "password"), "rotated-secret");
   assert.equal(auditLogger.events.at(-1)?.action, "password_update");
+});
+
+test("destructive tools require per-call acknowledgement and audit accepted calls", async () => {
+  const { client, auditLogger } = await createClientAndServer(false, {
+    enableDestructiveActions: true,
+  });
+
+  const missingAck = await client.callTool({
+    name: "item_delete",
+    arguments: {
+      vaultId: "vault-1",
+      itemId: "item-1",
+      reason: "Remove a duplicate test item",
+    },
+  });
+  assert.equal(missingAck.isError, true);
+
+  const deleted = await client.callTool({
+    name: "item_delete",
+    arguments: {
+      vaultId: "vault-1",
+      itemId: "item-1",
+      reason: "Remove a duplicate test item",
+      acknowledgeDestructive: DESTRUCTIVE_ACTION_ACK,
+    },
+  });
+
+  assert.notEqual(deleted.isError, true);
+  assert.equal(auditLogger.events.at(-1)?.action, "item_delete");
+  assert.equal(auditLogger.events.at(-1)?.metadata.reason, "Remove a duplicate test item");
+});
+
+test("permission mutation tools require per-call acknowledgement and audit accepted calls", async () => {
+  const { client, auditLogger } = await createClientAndServer(false, {
+    enablePermissionMutation: true,
+  });
+
+  const missingAck = await client.callTool({
+    name: "vault_permissions_grant_group",
+    arguments: {
+      vaultId: "vault-1",
+      groupId: "group-1",
+      permissions: ["READ_ITEMS"],
+      reason: "Grant read access for support coverage",
+    },
+  });
+  assert.equal(missingAck.isError, true);
+
+  const granted = await client.callTool({
+    name: "vault_permissions_grant_group",
+    arguments: {
+      vaultId: "vault-1",
+      groupId: "group-1",
+      permissions: ["READ_ITEMS"],
+      reason: "Grant read access for support coverage",
+      acknowledgePermissionMutation: PERMISSION_MUTATION_ACK,
+    },
+  });
+
+  assert.notEqual(granted.isError, true);
+  assert.equal(auditLogger.events.at(-1)?.action, "vault_permissions_grant_group");
+  assert.equal(
+    auditLogger.events.at(-1)?.metadata.reason,
+    "Grant read access for support coverage",
+  );
 });
 
 test("environment variable listing supports filtering and stays redacted", async () => {

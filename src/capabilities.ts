@@ -57,10 +57,11 @@ export const SDK_CAPABILITIES = {
   notes: [
     "Desktop auth requires the 1Password desktop app beta with SDK integration enabled.",
     "Secrets are opaque by default. Plaintext reveal is disabled unless the server starts with --enable-secret-reveal=true.",
-    "Write, destructive, and permission mutation tools are separately gated behind startup flags.",
+    "Password generator tools return new plaintext secrets only with a reason and generated-secret acknowledgement.",
+    "Write, destructive, and permission mutation tools are separately gated behind startup flags; destructive and permission mutation calls require per-call acknowledgement.",
     "The allowlisted script runner is disabled unless the server starts with --enable-script-runner=true.",
     "The script runner only uses startup-configured --script-runner-allowlist files and withholds stdout/stderr by default.",
-    "HTTP transport is optional, binds to 127.0.0.1 by default, and requires OP_MCP_HTTP_BEARER_TOKEN unless explicitly disabled.",
+    "HTTP transport is optional, local/single-user by design, validates browser Origin headers, bounds session lifetime/count, and requires OP_MCP_HTTP_BEARER_TOKEN unless explicitly disabled on localhost.",
     "Vault permission mutation is available only for group-based access because that is the surface exposed by the official JS SDK beta.",
     "1Password Environments are read-only at the moment because the official JS SDK beta only exposes variable retrieval.",
   ],

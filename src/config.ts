@@ -26,6 +26,10 @@ export interface ServerConfig {
   httpPath: string;
   httpRequireBearer: boolean;
   httpBearerToken?: string;
+  httpAllowedOrigins: string[];
+  httpMaxSessions: number;
+  httpSessionIdleMs: number;
+  httpRequestTimeoutMs: number;
   auditLogPath: string;
   logLevel: LogLevel;
   integrationName: string;
@@ -174,6 +178,39 @@ function parseHttpPath(value: string | undefined): string {
   return value;
 }
 
+function parseIntegerOption(
+  name: string,
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`Invalid ${name}: ${value}`);
+  }
+  return parsed;
+}
+
+function parseCommaList(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function isLocalHttpHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
 function resolveScriptRunnerAuthMode(
   authMode: AuthMode,
   opCliAuthMode: OpCliAuthMode,
@@ -220,6 +257,10 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --http-port=<port>",
         "  --http-path=<path>",
         "  --http-require-bearer=true|false",
+        "  --http-allowed-origin=<origin> (repeatable)",
+        "  --http-max-sessions=<count>",
+        "  --http-session-idle-ms=<milliseconds>",
+        "  --http-request-timeout-ms=<milliseconds>",
         "  --audit-log-path=<path>",
         "  --log-level=debug|info|warn|error",
       ].join("\n"),
@@ -311,10 +352,45 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     transport === "http",
   );
   const httpBearerToken = process.env.OP_MCP_HTTP_BEARER_TOKEN;
+  const httpAllowedOrigins = [
+    ...readFlagValues(argv, "http-allowed-origin"),
+    ...parseCommaList(process.env.OP_MCP_HTTP_ALLOWED_ORIGINS),
+  ];
+  const httpMaxSessions = parseIntegerOption(
+    "HTTP max sessions",
+    readFlagValue(argv, "http-max-sessions") ?? process.env.OP_MCP_HTTP_MAX_SESSIONS,
+    64,
+    1,
+    10_000,
+  );
+  const httpSessionIdleMs = parseIntegerOption(
+    "HTTP session idle timeout",
+    readFlagValue(argv, "http-session-idle-ms") ??
+      process.env.OP_MCP_HTTP_SESSION_IDLE_MS,
+    15 * 60_000,
+    1_000,
+    24 * 60 * 60_000,
+  );
+  const httpRequestTimeoutMs = parseIntegerOption(
+    "HTTP request timeout",
+    readFlagValue(argv, "http-request-timeout-ms") ??
+      process.env.OP_MCP_HTTP_REQUEST_TIMEOUT_MS,
+    30_000,
+    1_000,
+    10 * 60_000,
+  );
 
   if (transport === "http" && httpRequireBearer && !httpBearerToken) {
     throw new Error(
       "HTTP transport requires OP_MCP_HTTP_BEARER_TOKEN unless --http-require-bearer=false is set.",
+    );
+  }
+  if (transport === "http" && httpRequireBearer && httpBearerToken && httpBearerToken.length < 16) {
+    throw new Error("OP_MCP_HTTP_BEARER_TOKEN must be at least 16 characters long.");
+  }
+  if (transport === "http" && !httpRequireBearer && !isLocalHttpHost(httpHost)) {
+    throw new Error(
+      "Disabling HTTP bearer auth is only allowed when binding to localhost.",
     );
   }
 
@@ -381,6 +457,10 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     httpPath,
     httpRequireBearer,
     httpBearerToken,
+    httpAllowedOrigins,
+    httpMaxSessions,
+    httpSessionIdleMs,
+    httpRequestTimeoutMs,
     auditLogPath,
     logLevel: parseLogLevel(
       readFlagValue(argv, "log-level") ?? process.env.OP_MCP_LOG_LEVEL,

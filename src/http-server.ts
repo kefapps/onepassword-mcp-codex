@@ -16,32 +16,63 @@ export interface OnePasswordHttpServerHandle {
   close(): Promise<void>;
 }
 
+class HttpRequestError extends Error {
+  public constructor(
+    public readonly statusCode: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+interface SessionEntry {
+  transport: StreamableHTTPServerTransport;
+  idleTimer: NodeJS.Timeout;
+}
+
 function sendJson(
   response: ServerResponse,
   statusCode: number,
   payload: Record<string, unknown>,
+  headers: Record<string, string> = {},
 ): void {
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
+    ...headers,
   });
   response.end(`${JSON.stringify(payload)}\n`);
 }
 
-function forbiddenResponse(response: ServerResponse): void {
-  response.writeHead(401, {
-    "content-type": "application/json; charset=utf-8",
-    "www-authenticate": "Bearer",
-  });
-  response.end(
-    `${JSON.stringify({
+function jsonRpcErrorResponse(
+  response: ServerResponse,
+  statusCode: number,
+  code: number,
+  message: string,
+  headers: Record<string, string> = {},
+): void {
+  sendJson(
+    response,
+    statusCode,
+    {
       jsonrpc: "2.0",
       error: {
-        code: -32001,
-        message: "Unauthorized",
+        code,
+        message,
       },
       id: null,
-    })}\n`,
+    },
+    headers,
   );
+}
+
+function unauthorizedResponse(response: ServerResponse): void {
+  jsonRpcErrorResponse(response, 401, -32001, "Unauthorized", {
+    "www-authenticate": "Bearer",
+  });
+}
+
+function forbiddenResponse(response: ServerResponse): void {
+  jsonRpcErrorResponse(response, 403, -32003, "Forbidden");
 }
 
 function notFoundResponse(response: ServerResponse): void {
@@ -49,7 +80,7 @@ function notFoundResponse(response: ServerResponse): void {
 }
 
 function methodNotAllowedResponse(response: ServerResponse): void {
-  sendJson(response, 405, { error: "method_not_allowed" });
+  sendJson(response, 405, { error: "method_not_allowed" }, { allow: "GET, POST, DELETE" });
 }
 
 function isExpectedBearerToken(header: string | string[] | undefined, token: string): boolean {
@@ -75,7 +106,7 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytesRead += buffer.length;
     if (bytesRead > MAX_HTTP_BODY_BYTES) {
-      throw new Error("HTTP request body too large.");
+      throw new HttpRequestError(413, "HTTP request body too large.");
     }
     chunks.push(buffer);
   }
@@ -85,7 +116,11 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   }
 
   const body = Buffer.concat(chunks).toString("utf8").trim();
-  return body ? JSON.parse(body) : undefined;
+  try {
+    return body ? JSON.parse(body) : undefined;
+  } catch {
+    throw new HttpRequestError(400, "Malformed JSON request body.");
+  }
 }
 
 function assertAuthorized(config: ServerConfig, request: IncomingMessage): boolean {
@@ -93,6 +128,40 @@ function assertAuthorized(config: ServerConfig, request: IncomingMessage): boole
     return true;
   }
   return isExpectedBearerToken(request.headers.authorization, config.httpBearerToken ?? "");
+}
+
+function localDefaultOrigins(port: number): Set<string> {
+  return new Set([
+    `http://127.0.0.1:${port}`,
+    `http://localhost:${port}`,
+    `http://[::1]:${port}`,
+  ]);
+}
+
+function isLocalHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+function allowedOrigins(config: ServerConfig, port: number): Set<string> {
+  if (config.httpAllowedOrigins.length > 0) {
+    return new Set(config.httpAllowedOrigins);
+  }
+  return isLocalHost(config.httpHost) ? localDefaultOrigins(port) : new Set();
+}
+
+function assertOriginAllowed(
+  config: ServerConfig,
+  request: IncomingMessage,
+  port: number,
+): boolean {
+  const origin = request.headers.origin;
+  if (!origin) {
+    return true;
+  }
+  if (Array.isArray(origin)) {
+    return false;
+  }
+  return allowedOrigins(config, port).has(origin);
 }
 
 function listen(server: Server, host: string, port: number): Promise<void> {
@@ -123,11 +192,38 @@ export async function startOnePasswordHttpServer(
   auditLogger: AuditLogger,
   scriptRunner: OpScriptRunner,
 ): Promise<OnePasswordHttpServerHandle> {
-  const transports = new Map<string, StreamableHTTPServerTransport>();
+  const transports = new Map<string, SessionEntry>();
+  const clearSession = (sessionId: string): void => {
+    const entry = transports.get(sessionId);
+    if (!entry) {
+      return;
+    }
+    clearTimeout(entry.idleTimer);
+    transports.delete(sessionId);
+  };
+  const refreshSession = (sessionId: string, transport: StreamableHTTPServerTransport): void => {
+    const existing = transports.get(sessionId);
+    if (existing) {
+      clearTimeout(existing.idleTimer);
+    }
+    const idleTimer = setTimeout(() => {
+      clearSession(sessionId);
+      void transport.close();
+    }, config.httpSessionIdleMs);
+    idleTimer.unref();
+    transports.set(sessionId, { transport, idleTimer });
+  };
 
   const httpServer = createServer(async (request, response) => {
     try {
-      const path = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`).pathname;
+      const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+      const address = httpServer.address();
+      const port = typeof address === "object" && address ? address.port : config.httpPort;
+
+      if (!assertOriginAllowed(config, request, port)) {
+        forbiddenResponse(response);
+        return;
+      }
 
       if (path === "/healthz") {
         sendJson(response, 200, { ok: true });
@@ -140,7 +236,7 @@ export async function startOnePasswordHttpServer(
       }
 
       if (!assertAuthorized(config, request)) {
-        forbiddenResponse(response);
+        unauthorizedResponse(response);
         return;
       }
 
@@ -152,7 +248,11 @@ export async function startOnePasswordHttpServer(
       const body = request.method === "POST" ? await readJsonBody(request) : undefined;
       const sessionId = request.headers["mcp-session-id"];
       const existingSessionId = Array.isArray(sessionId) ? undefined : sessionId;
-      let transport = existingSessionId ? transports.get(existingSessionId) : undefined;
+      const sessionEntry = existingSessionId ? transports.get(existingSessionId) : undefined;
+      let transport = sessionEntry?.transport;
+      if (existingSessionId && transport) {
+        refreshSession(existingSessionId, transport);
+      }
 
       if (
         !transport &&
@@ -160,18 +260,22 @@ export async function startOnePasswordHttpServer(
         request.method === "POST" &&
         isInitializeRequest(body)
       ) {
+        if (transports.size >= config.httpMaxSessions) {
+          jsonRpcErrorResponse(response, 503, -32004, "Too many active MCP sessions.");
+          return;
+        }
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: true,
           onsessioninitialized: (initializedSessionId) => {
             if (transport) {
-              transports.set(initializedSessionId, transport);
+              refreshSession(initializedSessionId, transport);
             }
           },
         });
         transport.onclose = () => {
           if (transport?.sessionId) {
-            transports.delete(transport.sessionId);
+            clearSession(transport.sessionId);
           }
         };
 
@@ -185,33 +289,25 @@ export async function startOnePasswordHttpServer(
       }
 
       if (!transport) {
-        sendJson(response, 400, {
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: "Bad Request: No valid MCP session.",
-          },
-          id: null,
-        });
+        jsonRpcErrorResponse(response, 400, -32000, "Bad Request: No valid MCP session.");
         return;
       }
 
       await transport.handleRequest(request, response, body);
     } catch (error) {
       if (!response.headersSent) {
-        sendJson(response, 500, {
-          jsonrpc: "2.0",
-          error: {
-            code: -32603,
-            message: error instanceof Error ? error.message : "Internal server error",
-          },
-          id: null,
-        });
+        if (error instanceof HttpRequestError) {
+          jsonRpcErrorResponse(response, error.statusCode, -32000, error.message);
+          return;
+        }
+        jsonRpcErrorResponse(response, 500, -32603, "Internal server error");
       } else {
         response.end();
       }
     }
   });
+  httpServer.requestTimeout = config.httpRequestTimeoutMs;
+  httpServer.headersTimeout = Math.max(1_000, config.httpRequestTimeoutMs + 1_000);
 
   await listen(httpServer, config.httpHost, config.httpPort);
   const address = httpServer.address();
@@ -222,8 +318,9 @@ export async function startOnePasswordHttpServer(
     url: `http://${config.httpHost}:${port}${config.httpPath}`,
     async close() {
       await Promise.all(
-        Array.from(transports.values()).map(async (transport) => {
-          await transport.close();
+        Array.from(transports.values()).map(async (entry) => {
+          clearTimeout(entry.idleTimer);
+          await entry.transport.close();
         }),
       );
       transports.clear();
