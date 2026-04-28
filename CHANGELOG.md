@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.0](https://github.com/kefapps/onepassword-mcp-codex/compare/mcp-1password-v0.1.0...mcp-1password-v0.2.0) (2026-04-28)
+
+
+### Features
+
+* **http:** add configurable bearer-protected transport settings ([a2bae83](https://github.com/kefapps/onepassword-mcp-codex/commit/a2bae83cf15ad15a7d24535b04fe3219e7c8daab))
+* **script-runner:** support multi-root allowlists and hardened op auth ([49fd593](https://github.com/kefapps/onepassword-mcp-codex/commit/49fd593537aef97638b50073b74059d9acae8374))
+
+
+### Bug Fixes
+
+* **security:** remediate beta audit findings ([5509c23](https://github.com/kefapps/onepassword-mcp-codex/commit/5509c23d329e207128254f28841af9c7e9f50318))
+* **security:** remove version and feature flags from unauthenticated /healthz endpoint ([750c092](https://github.com/kefapps/onepassword-mcp-codex/commit/750c0922f57a4b093eb49a53d0557c89a8a1bd67))
+* **security:** warn on startup when HTTP transport is bound to non-localhost interface without TLS ([c5eab76](https://github.com/kefapps/onepassword-mcp-codex/commit/c5eab762764e89fa471aabfdbb07856ca9cfd9e0))
+* **security:** withhold errorMessage for sensitive script output when returnOutput=false ([4deacd4](https://github.com/kefapps/onepassword-mcp-codex/commit/4deacd49242be05d2dc77710cc33cb549b8bff1a))
+
+
+### Documentation
+
+* add AGENTS.md with conventional commits policy and version bump rules ([f762a40](https://github.com/kefapps/onepassword-mcp-codex/commit/f762a4059236c8005296e93f506a28d13ff41d53))
+* align release policy and distribution guidance ([e2a3a7e](https://github.com/kefapps/onepassword-mcp-codex/commit/e2a3a7e66df4f3c0905073e064f7c0488c19abbd))
+* keep repository documentation in English ([70c9f23](https://github.com/kefapps/onepassword-mcp-codex/commit/70c9f237fe0c1f50ce6fbdd033fc7b4cdcdff513))
+* rewrite README with beta disclaimer, TLS warning, and full configuration reference ([33b0e7d](https://github.com/kefapps/onepassword-mcp-codex/commit/33b0e7de1b483d46cfe0ed34b14401886c3a1c4f))
+
+## Changelog
+
 All notable changes to this project will be documented in this file.
 
 See [Conventional Commits](https://www.conventionalcommits.org/) for commit guidelines.
