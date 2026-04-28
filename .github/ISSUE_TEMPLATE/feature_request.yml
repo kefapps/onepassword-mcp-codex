@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an improvement or new capability.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. For security-sensitive changes, describe the safety model explicitly.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security Considerations
+      description: Does this affect secrets, writes, destructive actions, permissions, script execution, HTTP transport, audit logs, dependencies, or release workflows?
+    validations:
+      required: true
+
