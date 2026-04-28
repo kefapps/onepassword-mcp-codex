@@ -1,15 +1,35 @@
 {
-  "name": "@jbodin/onepassword-mcp-codex",
+  "name": "mcp-1password",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
-  "description": "Standalone MCP server for 1Password desktop app integrations with opaque-by-default secret handling.",
+  "description": "Neutral MCP server for 1Password desktop app integrations with opaque-by-default secret handling.",
   "license": "MIT",
+  "homepage": "https://github.com/kefapps/onepassword-mcp-codex",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kefapps/onepassword-mcp-codex.git"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "onepassword",
+    "1password",
+    "credentials"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "launchd/local.mcp-1password.plist.example"
+  ],
   "bin": {
+    "mcp-1password": "dist/index.js",
+    "onepassword-mcp": "dist/index.js",
     "onepassword-mcp-codex": "dist/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "dev": "tsx watch src/index.ts",
     "lint": "tsc --noEmit -p tsconfig.json",
     "start": "node dist/index.js",
