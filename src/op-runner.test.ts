@@ -234,7 +234,7 @@ test("DefaultOpScriptRunner rejects workspace outside configured roots", async (
   );
 });
 
-test("DefaultOpScriptRunner uses startup-pinned allowlists", async () => {
+test("DefaultOpScriptRunner only observes allowlist edits after reload", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -247,6 +247,9 @@ test("DefaultOpScriptRunner uses startup-pinned allowlists", async () => {
   const processRunner = new FakeProcessRunner([processResult()]);
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const initialAllowlist = await runner.list(workspace);
+  assert.equal(initialAllowlist.commands[0]?.id, "deploy");
 
   await writeFile(
     allowlistPath(workspace),
@@ -262,6 +265,52 @@ test("DefaultOpScriptRunner uses startup-pinned allowlists", async () => {
   );
 
   await assert.rejects(() => runner.run(workspace, "injected"), /not found/);
+
+  const reload = runner.reload();
+  const reloadedAllowlist = await runner.list(workspace);
+
+  assert.equal(reload.previousAllowlistCount, 1);
+  assert.equal(reload.allowlistCount, 1);
+  assert.equal(reload.commandCount, 1);
+  assert.equal(reloadedAllowlist.commands[0]?.id, "injected");
+  await assert.rejects(() => runner.run(workspace, "deploy"), /not found/);
+});
+
+test("DefaultOpScriptRunner keeps active allowlists when reload fails", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const config = createScriptRunnerConfig(workspace);
+  const processRunner = new FakeProcessRunner([]);
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  await writeFile(
+    allowlistPath(workspace),
+    JSON.stringify({
+      version: 1,
+      workspaceRoot: "..",
+      commands: {
+        injected: {
+          command: TEST_COMMAND,
+        },
+      },
+    }),
+    "utf8",
+  );
+
+  assert.throws(
+    () => runner.reload(),
+    /outside the configured script runner roots/,
+  );
+
+  const allowlist = await runner.list(workspace);
+  assert.equal(allowlist.commands[0]?.id, "deploy");
 });
 
 test("DefaultOpScriptRunner matches allowlist for nested workspace roots", async () => {
@@ -334,6 +383,46 @@ test("desktop auth validates the configured account and injects OP_ACCOUNT", asy
   assert.equal(commandCall?.env?.OP_SESSION, undefined);
 });
 
+test("script runner injects extra env and redacts supplied secret values", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "{}\n" }),
+    processResult({
+      stdout: "ok db-secret\n",
+      stderr: "warn db-secret\n",
+      errorMessage: "failed db-secret",
+    }),
+  ]);
+  const config = createScriptRunnerConfig(workspace, {
+    opCliAuthMode: "desktop",
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.run(workspace, "deploy", {
+    extraEnv: {
+      SUPABASE_DB_PASSWORD: "db-secret",
+    },
+    secretRedactionValues: ["db-secret"],
+  });
+  const commandCall = processRunner.calls.find(
+    (call) => call.command === TEST_COMMAND,
+  );
+
+  assert.equal(commandCall?.env?.SUPABASE_DB_PASSWORD, "db-secret");
+  assert.equal(result.stdout, "ok [REDACTED]\n");
+  assert.equal(result.stderr, "warn [REDACTED]\n");
+  assert.equal(result.errorMessage, "failed [REDACTED]");
+});
+
 test("script run PATH includes configured op directory without command directory prepend", async () => {
   const workspace = await createWorkspace({
     version: 1,
@@ -366,7 +455,7 @@ test("script run PATH includes configured op directory without command directory
   assert.notEqual(pathEntries[0], dirname(TEST_COMMAND));
 });
 
-test("manual-session auth refreshes expired cached OP_SESSION before running", async () => {
+test("manual-session auth reuses cached OP_SESSION without repeated validation", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -378,13 +467,8 @@ test("manual-session auth refreshes expired cached OP_SESSION before running", a
   });
   const processRunner = new FakeProcessRunner([
     processResult({ stdout: "session-token-1\n" }),
-    processResult({ stdout: "ok session-token-1\n" }),
-    processResult({
-      stderr: "session expired",
-      exitCode: 1,
-    }),
-    processResult({ stdout: "session-token-2\n" }),
-    processResult({ stdout: "ok session-token-2\n" }),
+    processResult({ stdout: "first run ok\n" }),
+    processResult({ stdout: "second run ok\n" }),
   ]);
   const config = createScriptRunnerConfig(workspace, {
     opCliAuthMode: "manual-session",
@@ -394,17 +478,25 @@ test("manual-session auth refreshes expired cached OP_SESSION before running", a
 
   const firstResult = await runner.run(workspace, "deploy");
   const secondResult = await runner.run(workspace, "deploy");
+  const signinCalls = processRunner.calls.filter((call) =>
+    call.args.includes("signin"),
+  );
+  const whoamiCalls = processRunner.calls.filter((call) =>
+    call.args.includes("whoami"),
+  );
   const commandCalls = processRunner.calls.filter(
     (call) => call.command === TEST_COMMAND,
   );
 
   assert.equal(firstResult.refreshedAuth, false);
-  assert.equal(firstResult.stdout, "ok [REDACTED]\n");
-  assert.equal(secondResult.refreshedAuth, true);
-  assert.equal(secondResult.stdout, "ok [REDACTED]\n");
+  assert.equal(firstResult.stdout, "first run ok\n");
+  assert.equal(secondResult.refreshedAuth, false);
+  assert.equal(secondResult.stdout, "second run ok\n");
+  assert.equal(signinCalls.length, 1);
+  assert.equal(whoamiCalls.length, 0);
   assert.equal(commandCalls.length, 2);
   assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
-  assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-2");
+  assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-1");
   assert.equal(commandCalls[0]?.env?.OP_SERVICE_ACCOUNT_TOKEN, undefined);
 });
 
@@ -430,7 +522,7 @@ test("manual-session auth coalesces concurrent signin refreshes", async () => {
   assert.equal(secondEnvironment.env.OP_SESSION, "session-token-1");
 });
 
-test("manual-session auth does not rerun failed scripts with auth-looking output", async () => {
+test("manual-session auth refreshes on the next run after auth-looking script failure", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -446,6 +538,8 @@ test("manual-session auth does not rerun failed scripts with auth-looking output
       stderr: "remote API says run op signin before deployment",
       exitCode: 1,
     }),
+    processResult({ stdout: "session-token-2\n" }),
+    processResult({ stdout: "second run ok\n" }),
   ]);
   const config = createScriptRunnerConfig(workspace, {
     opCliAuthMode: "manual-session",
@@ -453,17 +547,32 @@ test("manual-session auth does not rerun failed scripts with auth-looking output
   const sessionManager = new OpCliSessionManager(config, processRunner);
   const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
 
-  const result = await runner.run(workspace, "deploy");
+  const firstResult = await runner.run(workspace, "deploy");
+  const commandCallsAfterFirstRun = processRunner.calls.filter(
+    (call) => call.command === TEST_COMMAND,
+  );
+  const statusAfterFirstRun = sessionManager.status();
+  const secondResult = await runner.run(workspace, "deploy");
   const commandCalls = processRunner.calls.filter(
     (call) => call.command === TEST_COMMAND,
   );
+  const signinCalls = processRunner.calls.filter((call) =>
+    call.args.includes("signin"),
+  );
 
-  assert.equal(result.refreshedAuth, false);
-  assert.equal(result.stderr, "remote API says run op signin before deployment");
-  assert.equal(commandCalls.length, 1);
+  assert.equal(firstResult.refreshedAuth, false);
+  assert.equal(firstResult.stderr, "remote API says run op signin before deployment");
+  assert.equal(commandCallsAfterFirstRun.length, 1);
+  assert.equal(statusAfterFirstRun.manualSessionMarkedInvalid, true);
+  assert.equal(secondResult.refreshedAuth, true);
+  assert.equal(secondResult.stdout, "second run ok\n");
+  assert.equal(signinCalls.length, 2);
+  assert.equal(commandCalls.length, 2);
+  assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
+  assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-2");
 });
 
-test("manual-session auth does not refresh after non-auth whoami failures", async () => {
+test("manual-session auth reuses cached OP_SESSION after ordinary script failures", async () => {
   const workspace = await createWorkspace({
     version: 1,
     commands: {
@@ -477,10 +586,6 @@ test("manual-session auth does not refresh after non-auth whoami failures", asyn
     processResult({ stdout: "session-token-1\n" }),
     processResult({ stdout: "first run ok\n" }),
     processResult({
-      stderr: "op whoami failed: network timeout",
-      exitCode: 1,
-    }),
-    processResult({
       stderr: "script failed after partial side effects",
       exitCode: 1,
     }),
@@ -493,12 +598,20 @@ test("manual-session auth does not refresh after non-auth whoami failures", asyn
 
   await runner.run(workspace, "deploy");
   const result = await runner.run(workspace, "deploy");
+  const signinCalls = processRunner.calls.filter((call) =>
+    call.args.includes("signin"),
+  );
+  const whoamiCalls = processRunner.calls.filter((call) =>
+    call.args.includes("whoami"),
+  );
   const commandCalls = processRunner.calls.filter(
     (call) => call.command === TEST_COMMAND,
   );
 
   assert.equal(result.refreshedAuth, false);
   assert.equal(result.stderr, "script failed after partial side effects");
+  assert.equal(signinCalls.length, 1);
+  assert.equal(whoamiCalls.length, 0);
   assert.equal(commandCalls.length, 2);
   assert.equal(commandCalls[0]?.env?.OP_SESSION, "session-token-1");
   assert.equal(commandCalls[1]?.env?.OP_SESSION, "session-token-1");

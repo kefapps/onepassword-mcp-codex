@@ -69,6 +69,8 @@ export interface OpSessionStatus {
   accountConfigured: boolean;
   opCliPathConfigured: boolean;
   hasCachedSession: boolean;
+  manualSessionKnownValid: boolean;
+  manualSessionMarkedInvalid: boolean;
   desktopValidated: boolean;
 }
 
@@ -83,9 +85,25 @@ export interface OpScriptRunResult extends ProcessRunResult {
   refreshedAuth: boolean;
 }
 
+export interface OpScriptRunOptions {
+  extraEnv?: Record<string, string>;
+  secretRedactionValues?: string[];
+}
+
+export interface ScriptAllowlistReloadResult {
+  previousAllowlistCount: number;
+  allowlistCount: number;
+  commandCount: number;
+}
+
 export interface OpScriptRunner {
   list(workspaceRoot: string): Promise<ScriptAllowlist>;
-  run(workspaceRoot: string, commandId: string): Promise<OpScriptRunResult>;
+  run(
+    workspaceRoot: string,
+    commandId: string,
+    options?: OpScriptRunOptions,
+  ): Promise<OpScriptRunResult>;
+  reload(): ScriptAllowlistReloadResult;
   status(): OpSessionStatus;
   reset(): void;
 }
@@ -138,10 +156,25 @@ function redactExactValue(text: string, value: string | undefined): string {
   return text.replace(new RegExp(escapeRegExp(value), "g"), "[REDACTED]");
 }
 
+function redactSecretValues(text: string, values: string[] = []): string {
+  return [...new Set(values.filter(Boolean))]
+    .sort((left, right) => right.length - left.length)
+    .reduce((redacted, value) => redactExactValue(redacted, value), text);
+}
+
 function redactAuthText(text: string, sessionToken?: string, serviceToken?: string): string {
   return redactExactValue(redactExactValue(text, sessionToken), serviceToken)
     .replace(/OP_SESSION(?:_[A-Z0-9_]+)?=[^\s"']+/gi, "OP_SESSION=[REDACTED]")
     .replace(/OP_SERVICE_ACCOUNT_TOKEN=[^\s"']+/gi, "OP_SERVICE_ACCOUNT_TOKEN=[REDACTED]");
+}
+
+function redactSensitiveText(
+  text: string,
+  sessionToken?: string,
+  serviceToken?: string,
+  secretValues?: string[],
+): string {
+  return redactSecretValues(redactAuthText(text, sessionToken, serviceToken), secretValues);
 }
 
 function appendOutput(
@@ -358,6 +391,8 @@ export class NodeProcessRunner implements ProcessRunner {
 
 export class OpCliSessionManager {
   private cachedSessionToken?: string;
+  private manualSessionKnownValid = false;
+  private manualSessionMarkedInvalid = false;
   private desktopValidated = false;
   private manualSessionTokenPromise?: Promise<{
     token: string;
@@ -381,21 +416,35 @@ export class OpCliSessionManager {
       accountConfigured: Boolean(this.config.account),
       opCliPathConfigured: Boolean(this.config.opCliPath),
       hasCachedSession: Boolean(this.cachedSessionToken),
+      manualSessionKnownValid: this.manualSessionKnownValid,
+      manualSessionMarkedInvalid: this.manualSessionMarkedInvalid,
       desktopValidated: this.desktopValidated,
     };
   }
 
   public reset(): void {
     this.cachedSessionToken = undefined;
+    this.manualSessionKnownValid = false;
+    this.manualSessionMarkedInvalid = false;
     this.desktopValidated = false;
     this.manualSessionTokenPromise = undefined;
   }
 
-  public redact(text: string): string {
-    return redactAuthText(
+  public markManualSessionInvalid(): void {
+    if (this.resolvedAuthMode !== "manual-session" || !this.cachedSessionToken) {
+      return;
+    }
+
+    this.manualSessionKnownValid = false;
+    this.manualSessionMarkedInvalid = true;
+  }
+
+  public redact(text: string, secretValues?: string[]): string {
+    return redactSensitiveText(
       text,
       this.cachedSessionToken,
       this.config.serviceAccountToken,
+      secretValues,
     );
   }
 
@@ -500,10 +549,19 @@ export class OpCliSessionManager {
   }> {
     const hadCachedSession = Boolean(this.cachedSessionToken);
     if (this.cachedSessionToken) {
-      if (!(await this.isCurrentManualSessionInvalid())) {
+      if (this.manualSessionKnownValid && !this.manualSessionMarkedInvalid) {
+        return { token: this.cachedSessionToken, refreshedAuth: false };
+      }
+      if (
+        !this.manualSessionMarkedInvalid &&
+        !(await this.isCurrentManualSessionInvalid())
+      ) {
+        this.manualSessionKnownValid = true;
         return { token: this.cachedSessionToken, refreshedAuth: false };
       }
       this.cachedSessionToken = undefined;
+      this.manualSessionKnownValid = false;
+      this.manualSessionMarkedInvalid = false;
     }
 
     const result = await this.processRunner.run(
@@ -526,6 +584,8 @@ export class OpCliSessionManager {
     }
 
     this.cachedSessionToken = token;
+    this.manualSessionKnownValid = true;
+    this.manualSessionMarkedInvalid = false;
     return { token, refreshedAuth: hadCachedSession };
   }
 
@@ -543,24 +603,43 @@ export class OpCliSessionManager {
 }
 
 export class DefaultOpScriptRunner implements OpScriptRunner {
-  private readonly allowlistsByWorkspaceRoot: ScriptAllowlist[];
+  private allowlistsByWorkspaceRoot: ScriptAllowlist[];
 
   public constructor(
     private readonly config: ServerConfig,
     private readonly sessionManager = new OpCliSessionManager(config),
     private readonly processRunner: ProcessRunner = new NodeProcessRunner(),
   ) {
-    this.allowlistsByWorkspaceRoot = (config.enableScriptRunner ? loadConfiguredScriptAllowlists(config) : []).sort(
-      (left, right) => right.workspaceRoot.length - left.workspaceRoot.length,
-    );
+    this.allowlistsByWorkspaceRoot = this.loadAllowlists();
   }
 
   public status(): OpSessionStatus {
     return this.sessionManager.status();
   }
 
+  public reload(): ScriptAllowlistReloadResult {
+    const previousAllowlistCount = this.allowlistsByWorkspaceRoot.length;
+    const reloadedAllowlists = this.loadAllowlists();
+    this.allowlistsByWorkspaceRoot = reloadedAllowlists;
+
+    return {
+      previousAllowlistCount,
+      allowlistCount: reloadedAllowlists.length,
+      commandCount: reloadedAllowlists.reduce(
+        (total, allowlist) => total + allowlist.commands.length,
+        0,
+      ),
+    };
+  }
+
   public reset(): void {
     this.sessionManager.reset();
+  }
+
+  private loadAllowlists(): ScriptAllowlist[] {
+    return (
+      this.config.enableScriptRunner ? loadConfiguredScriptAllowlists(this.config) : []
+    ).sort((left, right) => right.workspaceRoot.length - left.workspaceRoot.length);
   }
 
   public async list(workspaceRoot: string): Promise<ScriptAllowlist> {
@@ -580,6 +659,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
   public async run(
     workspaceRoot: string,
     commandId: string,
+    options: OpScriptRunOptions = {},
   ): Promise<OpScriptRunResult> {
     const allowlist = await this.list(workspaceRoot);
     const command = allowlist.commands.find((candidate) => candidate.id === commandId);
@@ -591,20 +671,34 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     await validateCommandExecutable(command.command);
 
     const auth = await this.sessionManager.getEnvironment();
+    const env = createScriptEnvironment(
+      {
+        ...auth.env,
+        ...options.extraEnv,
+      },
+      this.config.opCliPath,
+    );
     const result = await this.processRunner.run(command.command, command.args, {
       cwd,
-      env: createScriptEnvironment(auth.env, this.config.opCliPath),
+      env,
       timeoutMs: command.timeoutMs,
       maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
     });
+    const stdout = this.sessionManager.redact(result.stdout, options.secretRedactionValues);
+    const stderr = this.sessionManager.redact(result.stderr, options.secretRedactionValues);
+    const errorMessage = result.errorMessage
+      ? this.sessionManager.redact(result.errorMessage, options.secretRedactionValues)
+      : undefined;
+
+    if (isDeterministicOpAuthFailure(result)) {
+      this.sessionManager.markManualSessionInvalid();
+    }
 
     return {
       ...result,
-      stdout: this.sessionManager.redact(result.stdout),
-      stderr: this.sessionManager.redact(result.stderr),
-      errorMessage: result.errorMessage
-        ? this.sessionManager.redact(result.errorMessage)
-        : undefined,
+      stdout,
+      stderr,
+      errorMessage,
       commandId,
       workspaceRoot: allowlist.workspaceRoot,
       cwd,

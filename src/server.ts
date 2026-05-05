@@ -13,6 +13,7 @@ import {
   ItemCategory,
   ItemFieldType,
 } from "@1password/sdk";
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AuditLogger } from "./audit.js";
@@ -26,7 +27,11 @@ import {
 } from "./constants.js";
 import { registerOnePasswordPrompts } from "./mcp-prompts.js";
 import { registerOnePasswordResources } from "./mcp-resources.js";
-import { DefaultOpScriptRunner, type OpScriptRunner } from "./op-runner.js";
+import {
+  DefaultOpScriptRunner,
+  type AllowlistedCommand,
+  type OpScriptRunner,
+} from "./op-runner.js";
 import {
   type PasswordMode,
   findPasswordField,
@@ -64,6 +69,93 @@ const fieldSchema = z.object({
 
 const permissionNameSchema = z.enum(PERMISSION_NAMES as [PermissionName, ...PermissionName[]]);
 const passwordModeSchema = z.enum(["provided", "random", "memorable"]);
+const envVariableNamePattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const reservedScriptEnvKeys = new Set([
+  "PATH",
+  "HOME",
+  "OP_ACCOUNT",
+  "OP_SESSION",
+  "OP_SERVICE_ACCOUNT_TOKEN",
+]);
+const SCRIPT_RUNNER_SECRET_HINT =
+  "When a secret is needed only by a command or local script, prefer op_script_run with envSecretRefs so the secret is injected into the child process and never returned in plaintext.";
+
+const envSecretRefsSchema = z.record(z.string().min(1), z.string().min(1));
+const passwordReadInputShape = {
+  secretReference: z.string().min(1).optional(),
+  vaultId: z.string().min(1).optional(),
+  itemId: z.string().min(1).optional(),
+  field: z.string().min(1).optional(),
+  reveal: z.boolean().optional(),
+  reason: z.string().optional(),
+  acknowledgePlaintext: z.string().optional(),
+} satisfies z.ZodRawShape;
+const passwordReadInputSchema = z
+  .object(passwordReadInputShape)
+  .superRefine((value, context) => {
+    const byReference = value.secretReference !== undefined;
+    const byItem = value.vaultId !== undefined && value.itemId !== undefined;
+
+    if (!byReference && !byItem) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide secretReference or both vaultId and itemId.",
+      });
+    }
+
+    if (byReference && (value.vaultId !== undefined || value.itemId !== undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Choose either secretReference mode or vaultId+itemId mode.",
+      });
+    }
+
+    if (value.reveal) {
+      if (!value.reason || value.reason.length < 3) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "reveal=true requires a reason of at least 3 characters.",
+        });
+      }
+      if (value.acknowledgePlaintext !== SECRET_REVEAL_ACK) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "reveal=true requires the exact plaintext acknowledgement string.",
+        });
+      }
+    }
+  });
+const secretRevealInputShape = {
+  reason: z.string().min(3),
+  acknowledgePlaintext: z.literal(SECRET_REVEAL_ACK),
+  reference: z.string().min(1).optional(),
+  vaultId: z.string().min(1).optional(),
+  itemId: z.string().min(1).optional(),
+  fieldId: z.string().min(1).optional(),
+} satisfies z.ZodRawShape;
+const secretRevealInputSchema = z
+  .object(secretRevealInputShape)
+  .superRefine((value, context) => {
+    const byReference = value.reference !== undefined;
+    const byField =
+      value.vaultId !== undefined &&
+      value.itemId !== undefined &&
+      value.fieldId !== undefined;
+
+    if (!byReference && !byField) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide either reference or vaultId+itemId+fieldId.",
+      });
+    }
+
+    if (byReference && byField) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Choose either reference mode or field mode, not both.",
+      });
+    }
+  });
 
 function jsonResult(data: unknown) {
   return {
@@ -171,7 +263,8 @@ function matchesQuery(item: object, query?: string) {
 function assertSecretRevealEnabled(config: ServerConfig): void {
   if (!config.enableSecretReveal) {
     throw new Error(
-      "Plaintext secret reveal is disabled. Restart the server with --enable-secret-reveal=true to allow this tool.",
+      `Plaintext secret reveal is disabled. ${SCRIPT_RUNNER_SECRET_HINT} ` +
+        "If plaintext is truly required, restart the server with OP_MCP_ENABLE_SECRET_REVEAL=true or --enable-secret-reveal=true.",
     );
   }
 }
@@ -206,6 +299,144 @@ function assertPermissionMutationEnabled(config: ServerConfig): void {
       "1Password permission mutation tools are disabled. Restart the server with --enable-permission-mutation=true to allow this tool.",
     );
   }
+}
+
+function secretConsumptionGuidance(config: ServerConfig): Record<string, unknown> {
+  return {
+    preferredPath: "op_script_run",
+    reason:
+      "Use this path when the user needs a secret consumed by an allowlisted command, not displayed to the model.",
+    plaintextRevealEnabled: config.enableSecretReveal,
+    scriptRunnerEnabled: config.enableScriptRunner,
+    nextStep: config.enableScriptRunner
+      ? "Call op_script_list for the workspaceRoot, then op_script_run with envSecretRefs mapping env var names to op:// references."
+      : "Restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist entries to enable secret injection into scripts.",
+  };
+}
+
+function scriptRunnerSecretInstruction(config: ServerConfig): string {
+  return config.enableScriptRunner
+    ? "Call op_script_list for the workspaceRoot, then op_script_run with envSecretRefs mapping environment variable names to op:// references."
+    : "op_script_run is not available because the script runner is also disabled here; restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist entries to allow no-plaintext secret consumption by scripts.";
+}
+
+function plaintextRevealDescription(
+  config: ServerConfig,
+  enabledDescription: string,
+): string {
+  if (config.enableSecretReveal) {
+    return `${enabledDescription} ${SCRIPT_RUNNER_SECRET_HINT}`;
+  }
+
+  return (
+    "Plaintext reveal is disabled in this server; this tool will fail until the server is restarted with OP_MCP_ENABLE_SECRET_REVEAL=true or --enable-secret-reveal=true. " +
+    `If the secret only needs to be consumed by a command or local script, do not call this tool. ${scriptRunnerSecretInstruction(config)}`
+  );
+}
+
+function passwordReadDescription(config: ServerConfig): string {
+  const base = "Read one password field or secret reference. Returns redacted metadata by default.";
+  if (config.enableSecretReveal) {
+    return `${base} Plaintext reveal is enabled with reveal=true plus reason and acknowledgement. ${SCRIPT_RUNNER_SECRET_HINT}`;
+  }
+
+  return (
+    `${base} Plaintext reveal is disabled in this server; reveal=true will fail. ` +
+    `If the secret only needs to be consumed by a command or local script, do not request reveal. ${scriptRunnerSecretInstruction(config)}`
+  );
+}
+
+function assertPlaintextOutputAcknowledged(
+  includeOutput: boolean,
+  requiresAcknowledgement: boolean,
+  acknowledgePlaintext?: string,
+): void {
+  if (
+    includeOutput &&
+    requiresAcknowledgement &&
+    acknowledgePlaintext !== SECRET_REVEAL_ACK
+  ) {
+    throw new Error(
+      `returnOutput=true with secret injection or sensitive output requires acknowledgePlaintext=${SECRET_REVEAL_ACK}.`,
+    );
+  }
+}
+
+function validateEnvSecretRefs(
+  envSecretRefs: Record<string, string> | undefined,
+): Record<string, string> {
+  const validated: Record<string, string> = {};
+
+  for (const [envVar, reference] of Object.entries(envSecretRefs ?? {})) {
+    if (!envVariableNamePattern.test(envVar)) {
+      throw new Error(`Invalid environment variable name for secret injection: ${envVar}.`);
+    }
+    if (reservedScriptEnvKeys.has(envVar)) {
+      throw new Error(`Environment variable ${envVar} is reserved and cannot be injected.`);
+    }
+
+    const trimmedReference = reference.trim();
+    if (!trimmedReference.startsWith("op://")) {
+      throw new Error(
+        `Secret reference for ${envVar} must be an op:// reference.`,
+      );
+    }
+    validated[envVar] = trimmedReference;
+  }
+
+  return validated;
+}
+
+function secretReferenceScheme(reference: string): string {
+  const schemeEnd = reference.indexOf("://");
+  return schemeEnd > 0 ? reference.slice(0, schemeEnd) : "unknown";
+}
+
+function secretReferenceHash(reference: string): string {
+  return createHash("sha256").update(reference).digest("hex");
+}
+
+function summarizeEnvSecretRefs(envSecretRefs: Record<string, string>) {
+  return Object.entries(envSecretRefs)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([envVar, reference]) => ({
+      envVar,
+      referenceScheme: secretReferenceScheme(reference),
+      referenceHash: secretReferenceHash(reference),
+    }));
+}
+
+async function resolveEnvSecretRefs(
+  service: OnePasswordService,
+  envSecretRefs: Record<string, string>,
+): Promise<{
+  extraEnv: Record<string, string>;
+  secretRedactionValues: string[];
+}> {
+  const resolved = await Promise.all(
+    Object.entries(envSecretRefs).map(async ([envVar, reference]) => {
+      const value = await service.secretResolve(reference);
+      return [envVar, value] as const;
+    }),
+  );
+
+  return {
+    extraEnv: Object.fromEntries(resolved),
+    secretRedactionValues: resolved.map(([, value]) => value),
+  };
+}
+
+async function getAllowlistedCommand(
+  scriptRunner: OpScriptRunner,
+  workspaceRoot: string,
+  commandId: string,
+): Promise<AllowlistedCommand> {
+  const allowlist = await scriptRunner.list(workspaceRoot);
+  const command = allowlist.commands.find((candidate) => candidate.id === commandId);
+  if (!command) {
+    throw new Error(`Allowlisted command ${commandId} not found.`);
+  }
+  return command;
 }
 
 function sanitizeAuditString(value: string): string {
@@ -410,7 +641,7 @@ export function createOnePasswordMcpServer(
     "sdk_capabilities",
     {
       description:
-        "Describe the capability surface exposed by this server and the official JS SDK gaps still blocking some admin flows.",
+        "Describe the capability surface exposed by this server, including the preferred no-plaintext path for consuming secrets in scripts.",
     },
     async () =>
       jsonResult({
@@ -427,7 +658,27 @@ export function createOnePasswordMcpServer(
         httpMaxSessions: config.httpMaxSessions,
         httpSessionIdleMs: config.httpSessionIdleMs,
         httpRequestTimeoutMs: config.httpRequestTimeoutMs,
+        secretConsumptionGuidance: secretConsumptionGuidance(config),
         ...SDK_CAPABILITIES,
+      }),
+  );
+
+  server.registerTool(
+    "op_session_status",
+    {
+      description:
+        "Show non-secret 1Password CLI session state and runtime capability gates held by this MCP process.",
+    },
+    async () =>
+      jsonResult({
+        ...scriptRunner.status(),
+        secretRevealEnabled: config.enableSecretReveal,
+        writesEnabled: config.enableWrites,
+        destructiveActionsEnabled: config.enableDestructiveActions,
+        permissionMutationEnabled: config.enablePermissionMutation,
+        scriptRunnerEnabled: config.enableScriptRunner,
+        scriptRunnerAllowlistCount: config.scriptRunnerAllowlistPaths.length,
+        secretConsumptionGuidance: secretConsumptionGuidance(config),
       }),
   );
 
@@ -436,7 +687,7 @@ export function createOnePasswordMcpServer(
       "op_script_list",
       {
         description:
-          "List startup-configured allowlisted scripts that can run with persistent 1Password CLI authentication managed by the MCP process.",
+          `List currently loaded startup-configured allowlisted scripts. ${SCRIPT_RUNNER_SECRET_HINT}`,
         inputSchema: {
           workspaceRoot: z.string().min(1),
         },
@@ -453,33 +704,95 @@ export function createOnePasswordMcpServer(
     );
 
     server.registerTool(
+      "op_script_reload_allowlists",
+      {
+        description:
+          "Reload the startup-configured script allowlist files into this MCP process. " +
+          "Only allowlist paths and trusted roots configured at server startup are used; invalid reloads fail without replacing the active allowlists.",
+        inputSchema: {
+          reason: z.string().min(3),
+        },
+      },
+      async ({ reason }) => {
+        assertScriptRunnerEnabled(config);
+
+        try {
+          const reload = scriptRunner.reload();
+          const result = {
+            reloaded: true,
+            configuredAllowlistPathCount: config.scriptRunnerAllowlistPaths.length,
+            ...reload,
+          };
+          recordAudit(auditLogger, "op_script_reload_allowlists", "success", {
+            reason,
+            ...result,
+          });
+          return jsonResult(result);
+        } catch (error) {
+          recordAudit(
+            auditLogger,
+            "op_script_reload_allowlists",
+            "error",
+            {
+              reason,
+              configuredAllowlistPathCount: config.scriptRunnerAllowlistPaths.length,
+            },
+            String(error),
+          );
+          throw error;
+        }
+      },
+    );
+
+    server.registerTool(
       "op_script_run",
       {
         description:
-          "Run one startup-configured allowlisted script with 1Password CLI auth injected by the MCP process. No free-form shell commands are accepted.",
+          `Run one currently loaded startup-configured allowlisted script with 1Password CLI auth injected by the MCP process. ${SCRIPT_RUNNER_SECRET_HINT} Use this instead of password_read reveal or secret_reveal when the secret only needs to be passed to a script. No free-form shell commands are accepted.`,
         inputSchema: {
           workspaceRoot: z.string().min(1),
           commandId: z.string().min(1),
           reason: z.string().min(3),
+          envSecretRefs: envSecretRefsSchema.optional(),
           returnOutput: z.boolean().optional(),
           acknowledgePlaintext: z.string().optional(),
         },
       },
-      async ({ workspaceRoot, commandId, reason, returnOutput, acknowledgePlaintext }) => {
+      async ({
+        workspaceRoot,
+        commandId,
+        reason,
+        envSecretRefs,
+        returnOutput,
+        acknowledgePlaintext,
+      }) => {
         assertScriptRunnerEnabled(config);
 
-        try {
-          const includeOutput = returnOutput ?? false;
-          if (includeOutput) {
-            assertSecretRevealEnabled(config);
-            if (acknowledgePlaintext !== SECRET_REVEAL_ACK) {
-              throw new Error(
-                `returnOutput=true requires acknowledgePlaintext=${SECRET_REVEAL_ACK}.`,
-              );
-            }
-          }
+        let envSecretReferences: ReturnType<typeof summarizeEnvSecretRefs> = [];
+        let injectedSecretEnvVars: string[] = [];
 
-          const result = await scriptRunner.run(workspaceRoot, commandId);
+        try {
+          const validatedEnvSecretRefs = validateEnvSecretRefs(envSecretRefs);
+          envSecretReferences = summarizeEnvSecretRefs(validatedEnvSecretRefs);
+          injectedSecretEnvVars = envSecretReferences.map((entry) => entry.envVar);
+
+          const includeOutput = returnOutput ?? false;
+          const command = await getAllowlistedCommand(scriptRunner, workspaceRoot, commandId);
+          assertPlaintextOutputAcknowledged(
+            includeOutput,
+            envSecretReferences.length > 0 || command?.sensitiveOutput === true,
+            acknowledgePlaintext,
+          );
+
+          const { extraEnv, secretRedactionValues } = await resolveEnvSecretRefs(
+            service,
+            validatedEnvSecretRefs,
+          );
+
+          const result = await scriptRunner.run(workspaceRoot, commandId, {
+            extraEnv,
+            secretRedactionValues,
+          });
           const outcome =
             result.exitCode === 0 && !result.timedOut ? "success" : "error";
           recordAudit(auditLogger, "op_script_run", outcome, {
@@ -498,12 +811,19 @@ export function createOnePasswordMcpServer(
             refreshedAuth: result.refreshedAuth,
             sensitiveOutput: result.sensitiveOutput,
             outputReturned: includeOutput,
+            envSecretRefCount: envSecretReferences.length,
+            injectedSecretEnvVars,
+            envSecretReferences,
           }, result.errorMessage);
 
           return {
             ...textResult(
               commandOutputText(result, includeOutput),
-              scriptRunStructuredContent(result, includeOutput),
+              {
+                ...scriptRunStructuredContent(result, includeOutput),
+                envSecretRefCount: envSecretReferences.length,
+                injectedSecretEnvVars,
+              },
             ),
             isError: outcome === "error",
           };
@@ -512,23 +832,18 @@ export function createOnePasswordMcpServer(
             auditLogger,
             "op_script_run",
             "error",
-            { workspaceRoot, commandId, reason },
+            {
+              workspaceRoot,
+              commandId,
+              reason,
+              envSecretRefCount: envSecretReferences.length,
+              injectedSecretEnvVars,
+              envSecretReferences,
+            },
             String(error),
           );
           throw error;
         }
-      },
-    );
-
-    server.registerTool(
-      "op_session_status",
-      {
-        description:
-          "Show non-secret 1Password CLI session state held by this MCP process.",
-      },
-      async () => {
-        assertScriptRunnerEnabled(config);
-        return jsonResult(scriptRunner.status());
       },
     );
 
@@ -639,60 +954,21 @@ export function createOnePasswordMcpServer(
 
   server.registerTool(
     "password_read",
-    {
-      description:
-        "Read one password field or secret reference. Returns redacted metadata by default; plaintext requires reveal=true plus reason and acknowledgement.",
-      inputSchema: z
-        .object({
-          secretReference: z.string().optional(),
-          vaultId: z.string().optional(),
-          itemId: z.string().optional(),
-          field: z.string().optional(),
-          reveal: z.boolean().optional(),
-          reason: z.string().optional(),
-          acknowledgePlaintext: z.string().optional(),
-        })
-        .superRefine((value, context) => {
-          const byReference = value.secretReference !== undefined;
-          const byItem = value.vaultId !== undefined && value.itemId !== undefined;
+      {
+        description: passwordReadDescription(config),
+        inputSchema: passwordReadInputShape,
+      },
+      async (rawArgs) => {
+        const { secretReference, vaultId, itemId, field, reveal, reason } =
+          passwordReadInputSchema.parse(rawArgs);
 
-          if (!byReference && !byItem) {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              message: "Provide secretReference or both vaultId and itemId.",
-            });
-          }
-
-          if (byReference && (value.vaultId !== undefined || value.itemId !== undefined)) {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              message: "Choose either secretReference mode or vaultId+itemId mode.",
-            });
-          }
-
-          if (value.reveal) {
-            if (!value.reason || value.reason.length < 3) {
-              context.addIssue({
-                code: z.ZodIssueCode.custom,
-                message: "reveal=true requires a reason of at least 3 characters.",
-              });
-            }
-            if (value.acknowledgePlaintext !== SECRET_REVEAL_ACK) {
-              context.addIssue({
-                code: z.ZodIssueCode.custom,
-                message: "reveal=true requires the exact plaintext acknowledgement string.",
-              });
-            }
-          }
-        }),
-    },
-    async ({ secretReference, vaultId, itemId, field, reveal, reason }) => {
-      if (!reveal) {
-        if (secretReference) {
-          return jsonResult({
+        if (!reveal) {
+          if (secretReference) {
+            return jsonResult({
             mode: "reference",
             reference: secretReference,
             valueState: "redacted",
+            secretConsumptionGuidance: secretConsumptionGuidance(config),
           });
         }
 
@@ -706,6 +982,7 @@ export function createOnePasswordMcpServer(
           field: passwordField.id,
           fieldType: passwordField.fieldType,
           valueState: "redacted",
+          secretConsumptionGuidance: secretConsumptionGuidance(config),
         });
       }
 
@@ -1424,7 +1701,7 @@ export function createOnePasswordMcpServer(
     "environment_get_variables",
     {
       description:
-        "Get 1Password Environment variables with values redacted. Supports simple client-side filtering by variable name.",
+        `Get 1Password Environment variables with values redacted. Supports simple client-side filtering by variable name. ${SCRIPT_RUNNER_SECRET_HINT}`,
       inputSchema: {
         environmentId: z.string().min(1),
         query: z.string().optional(),
@@ -1441,6 +1718,7 @@ export function createOnePasswordMcpServer(
         variables: filtered
           .slice(0, limit ?? 100)
           .map((variable) => redactEnvironmentVariable(variable)),
+        secretConsumptionGuidance: secretConsumptionGuidance(config),
       });
     },
   );
@@ -1449,7 +1727,7 @@ export function createOnePasswordMcpServer(
     "environment_get_variable",
     {
       description:
-        "Get one 1Password Environment variable by exact name, with the value redacted.",
+        `Get one 1Password Environment variable by exact name, with the value redacted. ${SCRIPT_RUNNER_SECRET_HINT}`,
       inputSchema: {
         environmentId: z.string().min(1),
         name: z.string().min(1),
@@ -1461,6 +1739,7 @@ export function createOnePasswordMcpServer(
       return jsonResult({
         environmentId,
         variable: redactEnvironmentVariable(variable),
+        secretConsumptionGuidance: secretConsumptionGuidance(config),
       });
     },
   );
@@ -1468,8 +1747,10 @@ export function createOnePasswordMcpServer(
   server.registerTool(
     "environment_reveal_variable",
     {
-      description:
+      description: plaintextRevealDescription(
+        config,
         "Reveal one 1Password Environment variable in plaintext. Requires secret reveal to be enabled and writes an audit entry.",
+      ),
       inputSchema: {
         environmentId: z.string().min(1),
         name: z.string().min(1),
@@ -1512,44 +1793,20 @@ export function createOnePasswordMcpServer(
 
   server.registerTool(
     "secret_reveal",
-    {
-      description:
-        "Return a secret in plaintext only when the server was explicitly started with secret reveal enabled. This tool writes an audit entry.",
-      inputSchema: z
-        .object({
-          reason: z.string().min(3),
-          acknowledgePlaintext: z.literal(SECRET_REVEAL_ACK),
-          reference: z.string().optional(),
-          vaultId: z.string().optional(),
-          itemId: z.string().optional(),
-          fieldId: z.string().optional(),
-        })
-        .superRefine((value, context) => {
-          const byReference = value.reference !== undefined;
-          const byField =
-            value.vaultId !== undefined &&
-            value.itemId !== undefined &&
-            value.fieldId !== undefined;
+      {
+        description: plaintextRevealDescription(
+          config,
+          "Return a secret in plaintext. This tool writes an audit entry.",
+        ),
+        inputSchema: secretRevealInputShape,
+      },
+      async (rawArgs) => {
+        const { reason, reference, vaultId, itemId, fieldId } =
+          secretRevealInputSchema.parse(rawArgs);
 
-          if (!byReference && !byField) {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              message: "Provide either reference or vaultId+itemId+fieldId.",
-            });
-          }
+        assertSecretRevealEnabled(config);
 
-          if (byReference && byField) {
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              message: "Choose either reference mode or field mode, not both.",
-            });
-          }
-        }),
-    },
-    async ({ reason, reference, vaultId, itemId, fieldId }) => {
-      assertSecretRevealEnabled(config);
-
-      try {
+        try {
         let secret: string;
         let revealMode: "reference" | "field";
 
