@@ -310,14 +310,14 @@ function secretConsumptionGuidance(config: ServerConfig): Record<string, unknown
     scriptRunnerEnabled: config.enableScriptRunner,
     nextStep: config.enableScriptRunner
       ? "Call op_script_list for the workspaceRoot, then op_script_run with envSecretRefs mapping env var names to op:// references."
-      : "Restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist entries to enable secret injection into scripts.",
+      : "Restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist or --script-runner-allowlist-manifest entries to enable secret injection into scripts.",
   };
 }
 
 function scriptRunnerSecretInstruction(config: ServerConfig): string {
   return config.enableScriptRunner
     ? "Call op_script_list for the workspaceRoot, then op_script_run with envSecretRefs mapping environment variable names to op:// references."
-    : "op_script_run is not available because the script runner is also disabled here; restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist entries to allow no-plaintext secret consumption by scripts.";
+    : "op_script_run is not available because the script runner is also disabled here; restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist or --script-runner-allowlist-manifest entries to allow no-plaintext secret consumption by scripts.";
 }
 
 function plaintextRevealDescription(
@@ -651,6 +651,8 @@ export function createOnePasswordMcpServer(
         destructiveActionsEnabled: config.enableDestructiveActions,
         permissionMutationEnabled: config.enablePermissionMutation,
         scriptRunnerEnabled: config.enableScriptRunner,
+        scriptRunnerAllowlistManifestCount:
+          config.scriptRunnerAllowlistManifestPaths.length,
         transport: config.transport,
         httpPath: config.httpPath,
         httpRequireBearer: config.httpRequireBearer,
@@ -669,17 +671,24 @@ export function createOnePasswordMcpServer(
       description:
         "Show non-secret 1Password CLI session state and runtime capability gates held by this MCP process.",
     },
-    async () =>
-      jsonResult({
-        ...scriptRunner.status(),
+    async () => {
+      const status = scriptRunner.status();
+      return jsonResult({
+        ...status,
         secretRevealEnabled: config.enableSecretReveal,
         writesEnabled: config.enableWrites,
         destructiveActionsEnabled: config.enableDestructiveActions,
         permissionMutationEnabled: config.enablePermissionMutation,
         scriptRunnerEnabled: config.enableScriptRunner,
-        scriptRunnerAllowlistCount: config.scriptRunnerAllowlistPaths.length,
+        scriptRunnerAllowlistCount:
+          status.loadedAllowlistCount ?? config.scriptRunnerAllowlistPaths.length,
+        scriptRunnerConfiguredAllowlistPathCount:
+          config.scriptRunnerAllowlistPaths.length,
+        scriptRunnerAllowlistManifestCount:
+          config.scriptRunnerAllowlistManifestPaths.length,
         secretConsumptionGuidance: secretConsumptionGuidance(config),
-      }),
+      });
+    },
   );
 
   if (config.enableScriptRunner) {
@@ -708,7 +717,7 @@ export function createOnePasswordMcpServer(
       {
         description:
           "Reload the startup-configured script allowlist files into this MCP process. " +
-          "Only allowlist paths and trusted roots configured at server startup are used; invalid reloads fail without replacing the active allowlists.",
+          "Only direct allowlist paths, manifest trust anchors, and trusted roots configured at server startup are used; invalid reloads fail without replacing the active allowlists.",
         inputSchema: {
           reason: z.string().min(3),
         },
@@ -721,6 +730,8 @@ export function createOnePasswordMcpServer(
           const result = {
             reloaded: true,
             configuredAllowlistPathCount: config.scriptRunnerAllowlistPaths.length,
+            configuredAllowlistManifestCount:
+              config.scriptRunnerAllowlistManifestPaths.length,
             ...reload,
           };
           recordAudit(auditLogger, "op_script_reload_allowlists", "success", {
@@ -736,6 +747,8 @@ export function createOnePasswordMcpServer(
             {
               reason,
               configuredAllowlistPathCount: config.scriptRunnerAllowlistPaths.length,
+              configuredAllowlistManifestCount:
+                config.scriptRunnerAllowlistManifestPaths.length,
             },
             String(error),
           );

@@ -325,6 +325,8 @@ class FakeOpScriptRunner implements OpScriptRunner {
       manualSessionKnownValid: true,
       manualSessionMarkedInvalid: false,
       desktopValidated: false,
+      loadedAllowlistCount: this.reloadResult.allowlistCount,
+      loadedAllowlistCommandCount: this.reloadResult.commandCount,
     };
   }
 
@@ -361,6 +363,7 @@ async function createClientAndServer(
     enableScriptRunner: options.enableScriptRunner ?? false,
     scriptRunnerRoots: ["/workspace"],
     scriptRunnerAllowlistPaths: ["/workspace/.onepassword-mcp.json"],
+    scriptRunnerAllowlistManifestPaths: [],
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "stdio",
@@ -496,6 +499,8 @@ test("op_session_status exposes runtime gates when script runner is disabled", a
     permissionMutationEnabled: boolean;
     scriptRunnerEnabled: boolean;
     scriptRunnerAllowlistCount: number;
+    scriptRunnerConfiguredAllowlistPathCount: number;
+    scriptRunnerAllowlistManifestCount: number;
   };
 
   assert.equal(payload.secretRevealEnabled, false);
@@ -503,7 +508,9 @@ test("op_session_status exposes runtime gates when script runner is disabled", a
   assert.equal(payload.destructiveActionsEnabled, false);
   assert.equal(payload.permissionMutationEnabled, false);
   assert.equal(payload.scriptRunnerEnabled, false);
-  assert.equal(payload.scriptRunnerAllowlistCount, 1);
+  assert.equal(payload.scriptRunnerAllowlistCount, 0);
+  assert.equal(payload.scriptRunnerConfiguredAllowlistPathCount, 1);
+  assert.equal(payload.scriptRunnerAllowlistManifestCount, 0);
 });
 
 test("registers prompts and resources", async () => {
@@ -960,6 +967,7 @@ test("script runner reloads allowlists with audit", async () => {
   const payload = result.structuredContent as {
     reloaded: boolean;
     configuredAllowlistPathCount: number;
+    configuredAllowlistManifestCount: number;
     previousAllowlistCount: number;
     allowlistCount: number;
     commandCount: number;
@@ -970,6 +978,7 @@ test("script runner reloads allowlists with audit", async () => {
   assert.equal(scriptRunner.reloadCalls, 1);
   assert.equal(payload.reloaded, true);
   assert.equal(payload.configuredAllowlistPathCount, 1);
+  assert.equal(payload.configuredAllowlistManifestCount, 0);
   assert.equal(payload.previousAllowlistCount, 1);
   assert.equal(payload.allowlistCount, 1);
   assert.equal(payload.commandCount, 2);

@@ -15,6 +15,7 @@ function createConfig(): ServerConfig {
     enableScriptRunner: false,
     scriptRunnerRoots: [],
     scriptRunnerAllowlistPaths: [],
+    scriptRunnerAllowlistManifestPaths: [],
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "stdio",

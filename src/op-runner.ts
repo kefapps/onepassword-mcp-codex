@@ -72,6 +72,8 @@ export interface OpSessionStatus {
   manualSessionKnownValid: boolean;
   manualSessionMarkedInvalid: boolean;
   desktopValidated: boolean;
+  loadedAllowlistCount?: number;
+  loadedAllowlistCommandCount?: number;
 }
 
 export interface OpScriptRunResult extends ProcessRunResult {
@@ -122,6 +124,11 @@ const allowlistSchema = z.object({
   workspaceRoot: z.string().min(1).optional(),
   workspaceRoots: z.array(z.string().min(1)).optional(),
   commands: z.record(commandSchema),
+});
+
+const allowlistManifestSchema = z.object({
+  version: z.literal(1),
+  allowlists: z.array(z.string().min(1)),
 });
 
 const BASE_CHILD_ENV_KEYS = [
@@ -614,7 +621,14 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
   }
 
   public status(): OpSessionStatus {
-    return this.sessionManager.status();
+    return {
+      ...this.sessionManager.status(),
+      loadedAllowlistCount: this.allowlistsByWorkspaceRoot.length,
+      loadedAllowlistCommandCount: this.allowlistsByWorkspaceRoot.reduce(
+        (total, allowlist) => total + allowlist.commands.length,
+        0,
+      ),
+    };
   }
 
   public reload(): ScriptAllowlistReloadResult {
@@ -760,14 +774,19 @@ function assertWorkspaceRootAllowed(
 }
 
 export function loadConfiguredScriptAllowlists(
-  config: Pick<ServerConfig, "scriptRunnerAllowlistPaths" | "scriptRunnerRoots">,
+  config: Pick<
+    ServerConfig,
+    | "scriptRunnerAllowlistPaths"
+    | "scriptRunnerAllowlistManifestPaths"
+    | "scriptRunnerRoots"
+  >,
 ): ScriptAllowlist[] {
   const resolvedAllowedRoots = config.scriptRunnerRoots.map((root) =>
     realpathSync(root),
   );
+  const resolvedAllowlistPaths = loadConfiguredScriptAllowlistPaths(config);
 
-  return config.scriptRunnerAllowlistPaths.flatMap((allowlistPath) => {
-    const resolvedAllowlistPath = realpathSync(allowlistPath);
+  return resolvedAllowlistPaths.flatMap((resolvedAllowlistPath) => {
     const raw = readFileSync(resolvedAllowlistPath, "utf8");
     const parsed = allowlistSchema.parse(JSON.parse(raw));
     const workspaceRoots = resolveWorkspaceRootsFromParsed(
@@ -783,6 +802,37 @@ export function loadConfiguredScriptAllowlists(
       return [scriptAllowlistFromParsed(resolvedAllowlistPath, workspaceRoot, parsed)];
     });
   });
+}
+
+function loadConfiguredScriptAllowlistPaths(
+  config: Pick<
+    ServerConfig,
+    "scriptRunnerAllowlistPaths" | "scriptRunnerAllowlistManifestPaths"
+  >,
+): string[] {
+  const directPaths = config.scriptRunnerAllowlistPaths.map((allowlistPath) =>
+    realpathSync(allowlistPath),
+  );
+  const manifestPaths = config.scriptRunnerAllowlistManifestPaths.flatMap(
+    (manifestPath) => loadAllowlistPathsFromManifest(manifestPath),
+  );
+
+  return [...new Set([...directPaths, ...manifestPaths])];
+}
+
+function loadAllowlistPathsFromManifest(manifestPath: string): string[] {
+  const resolvedManifestPath = realpathSync(manifestPath);
+  const raw = readFileSync(resolvedManifestPath, "utf8");
+  const parsed = allowlistManifestSchema.parse(JSON.parse(raw));
+  const base = dirname(resolvedManifestPath);
+
+  return parsed.allowlists.map((allowlistPath) =>
+    realpathSync(
+      isAbsolute(allowlistPath)
+        ? allowlistPath
+        : resolve(base, allowlistPath),
+    ),
+  );
 }
 
 async function resolveWorkspacePath(

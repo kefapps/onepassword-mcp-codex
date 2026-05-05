@@ -62,7 +62,7 @@ export const SDK_CAPABILITIES = {
     "Password generator tools return new plaintext secrets only with a reason and generated-secret acknowledgement.",
     "Write, destructive, and permission mutation tools are separately gated behind startup flags; destructive and permission mutation calls require per-call acknowledgement.",
     "The allowlisted script runner is disabled unless the server starts with --enable-script-runner=true.",
-    "The script runner only uses startup-configured --script-runner-allowlist paths; their file contents can be reloaded on demand and stdout/stderr is withheld by default.",
+    "The script runner only uses startup-configured --script-runner-allowlist paths and --script-runner-allowlist-manifest trust anchors; their file contents can be reloaded on demand and stdout/stderr is withheld by default.",
     "HTTP transport is optional, local/single-user by design, validates browser Origin headers, bounds session lifetime/count, and requires OP_MCP_HTTP_BEARER_TOKEN unless explicitly disabled on localhost.",
     "Vault permission mutation is available only for group-based access because that is the surface exposed by the official JS SDK beta.",
     "1Password Environments are read-only at the moment because the official JS SDK beta only exposes variable retrieval.",

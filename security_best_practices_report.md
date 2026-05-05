@@ -35,7 +35,7 @@ The remaining deployment boundary is intentional: HTTP is still a local/single-u
 
 - Secrets are redacted by default; plaintext reveal requires startup opt-in plus acknowledgement.
 - Writes, destructive actions, permission mutations, and script runner are disabled by default.
-- Script execution uses startup-configured allowlist paths, audited on-demand reloads, absolute commands, `spawn(..., shell: false)`, timeouts, output limits, and withheld sensitive output.
+- Script execution uses startup-configured allowlist paths and manifest trust anchors, audited on-demand reloads, absolute commands, `spawn(..., shell: false)`, timeouts, output limits, and withheld sensitive output.
 - Audit logs avoid secret values and are written to a `0600` file in a `0700` directory.
 - `/healthz` returns only `{ ok: true }`.
 
