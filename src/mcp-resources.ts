@@ -40,6 +40,8 @@ export function registerOnePasswordResources(
         scriptRunnerEnabled: config.enableScriptRunner,
         scriptRunnerRootCount: config.scriptRunnerRoots.length,
         scriptRunnerAllowlistCount: config.scriptRunnerAllowlistPaths.length,
+        scriptRunnerAllowlistManifestCount:
+          config.scriptRunnerAllowlistManifestPaths.length,
         opCliAuthMode: config.opCliAuthMode,
         opCliPathConfigured: Boolean(config.opCliPath),
         transport: config.transport,

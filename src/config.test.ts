@@ -16,6 +16,7 @@ const ENV_KEYS = [
   "OP_MCP_HTTP_MAX_SESSIONS",
   "OP_MCP_HTTP_SESSION_IDLE_MS",
   "OP_MCP_HTTP_REQUEST_TIMEOUT_MS",
+  "OP_MCP_SCRIPT_RUNNER_ALLOWLIST_MANIFESTS",
 ] as const;
 
 function withCleanAuthEnv(callback: () => void): void {
@@ -48,6 +49,7 @@ test("parseConfig keeps write and script runner gates disabled by default", () =
   assert.equal(config.enableScriptRunner, false);
   assert.deepEqual(config.scriptRunnerRoots, []);
   assert.deepEqual(config.scriptRunnerAllowlistPaths, []);
+  assert.deepEqual(config.scriptRunnerAllowlistManifestPaths, []);
   assert.equal(config.transport, "stdio");
   assert.equal(config.httpHost, "127.0.0.1");
   assert.equal(config.httpPort, 17337);
@@ -142,6 +144,23 @@ test("parseConfig requires absolute allowlist paths when script runner is enable
   );
 });
 
+test("parseConfig requires absolute allowlist manifest paths when script runner is enabled", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--account",
+          "TestAccount",
+          "--enable-script-runner=true",
+          "--script-runner-allowlist-manifest=.onepassword-mcp-manifest.json",
+          "--op-cli-path=/usr/local/bin/op",
+        ],
+        "0.1.0",
+      ),
+    /allowlist manifest path must be absolute/,
+  );
+});
+
 test("parseConfig accepts hardened script runner configuration", () => {
   const config = parseConfig(
     [
@@ -161,8 +180,29 @@ test("parseConfig accepts hardened script runner configuration", () => {
   assert.deepEqual(config.scriptRunnerAllowlistPaths, [
     "/tmp/.onepassword-mcp.json",
   ]);
+  assert.deepEqual(config.scriptRunnerAllowlistManifestPaths, []);
   assert.equal(config.opCliPath, "/usr/local/bin/op");
   assert.equal(config.opCliAuthMode, "manual-session");
+});
+
+test("parseConfig accepts startup allowlist manifests", () => {
+  const config = parseConfig(
+    [
+      "--account",
+      "TestAccount",
+      "--enable-script-runner=true",
+      "--script-runner-root=/tmp",
+      "--script-runner-allowlist-manifest=/tmp/onepassword-mcp-manifest.json",
+      "--op-cli-path=/usr/local/bin/op",
+    ],
+    "0.1.0",
+  );
+
+  assert.equal(config.enableScriptRunner, true);
+  assert.deepEqual(config.scriptRunnerAllowlistPaths, []);
+  assert.deepEqual(config.scriptRunnerAllowlistManifestPaths, [
+    "/tmp/onepassword-mcp-manifest.json",
+  ]);
 });
 
 test("parseConfig requires a bearer token for HTTP transport by default", () => {

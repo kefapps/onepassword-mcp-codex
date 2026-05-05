@@ -106,6 +106,7 @@ Every flag can also be set through an environment variable.
 | `--enable-permission-mutation` | `OP_MCP_ENABLE_PERMISSION_MUTATION` | `false` | Allow vault permission changes |
 | `--enable-script-runner` | `OP_MCP_ENABLE_SCRIPT_RUNNER` | `false` | Allow execution of allowlisted scripts |
 | `--script-runner-allowlist` | `OP_MCP_SCRIPT_RUNNER_ALLOWLISTS` | - | Absolute path to an allowlist file; repeatable |
+| `--script-runner-allowlist-manifest` | `OP_MCP_SCRIPT_RUNNER_ALLOWLIST_MANIFESTS` | - | Absolute path to a manifest listing allowlist files; repeatable |
 | `--script-runner-root` | `OP_MCP_SCRIPT_RUNNER_ROOTS` | - | Trusted workspace root; repeatable |
 | `--op-cli-path` | `OP_MCP_OP_CLI_PATH` | `op` | Path to the `op` binary; must be absolute when the script runner is enabled |
 | `--op-cli-auth-mode` | `OP_MCP_OP_CLI_AUTH_MODE` | `auto` | `auto`, `desktop`, `manual-session`, or `service-account` |
@@ -124,7 +125,7 @@ Every flag can also be set through an environment variable.
 
 ## Script Runner
 
-The script runner lets agents invoke pre-approved shell commands with 1Password CLI authentication injected automatically. **Free-form shell execution is never accepted**; only commands defined in allowlist paths configured at startup can run. The contents of those startup-configured allowlist files can be reloaded on demand with `op_script_reload_allowlists`.
+The script runner lets agents invoke pre-approved shell commands with 1Password CLI authentication injected automatically. **Free-form shell execution is never accepted**; only commands defined in startup-configured allowlist files, or in allowlist files referenced by startup-configured manifests, can run. The contents of those files can be reloaded on demand with `op_script_reload_allowlists`.
 
 ### Allowlist Format
 
@@ -154,6 +155,22 @@ Create a `.onepassword-mcp.json` file at the root of your project:
 - `returnOutput=true` does not require startup secret reveal for ordinary output, but when `envSecretRefs` is provided or the command has `sensitiveOutput: true`, the call must include `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT"`. Returned stdout/stderr/error messages are redacted by exact secret value.
 - After editing a startup-configured allowlist file, call `op_script_reload_allowlists` with a reason. If the edited file is invalid, the reload fails and the previous in-memory allowlist remains active.
 
+### Allowlist Manifest Format
+
+Use `--script-runner-allowlist-manifest=/absolute/path/to/allowlists.json` when you want to add or remove allowlist files without restarting the MCP process. Manifest entries may be absolute paths or paths relative to the manifest file:
+
+```json
+{
+  "version": 1,
+  "allowlists": [
+    "/absolute/path/to/project-a/.onepassword-mcp.json",
+    "../project-b/.onepassword-mcp.json"
+  ]
+}
+```
+
+After editing the manifest, call `op_script_reload_allowlists` with a reason. Any new workspace roots are still checked against startup-configured `--script-runner-root` values when roots are provided.
+
 ### Agent Routing Guidance
 
 When an agent needs a secret only to run a local command, it should not call `password_read` with `reveal=true` or `secret_reveal` first. Prefer this flow:
@@ -174,7 +191,7 @@ This keeps the plaintext secret out of the model transcript while still letting 
 - **Dangerous capabilities are opt-in and disabled by default**, including writes, destructive actions, permission mutation, secret reveal, and the script runner.
 - **Every sensitive action is audited** to a JSONL file. Secret references and auth tokens are automatically redacted from logs.
 - **The script runner uses `spawn` with `shell: false`**, so shell injection is not available. Commands must be allowlisted and use absolute paths.
-- **Allowlist reloads are bounded and audited.** `op_script_reload_allowlists` only reloads allowlist file paths and trusted roots configured at startup, records the reload reason, and keeps the previous in-memory allowlist if validation fails.
+- **Allowlist reloads are bounded and audited.** `op_script_reload_allowlists` only reloads direct allowlist paths and manifest trust anchors configured at startup, records the reload reason, and keeps the previous in-memory allowlist if validation fails.
 - **Script secret injection is run-only.** `envSecretRefs` values are resolved in memory, injected into the allowlisted child process, redacted from returned output, and audited only by env var name, reference scheme, and reference hash.
 - **Bearer token comparison uses `crypto.timingSafeEqual`** to reduce timing attack risk.
 - **HTTP binds to localhost (`127.0.0.1`) by default.** It validates the `Origin` header, caps active sessions, expires idle sessions, and returns generic messages for server errors.

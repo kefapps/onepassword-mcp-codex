@@ -68,9 +68,19 @@ function serverArgs(extraArgs = []) {
     args.push("--enable-permission-mutation=true");
   }
 
-  if (optionalEnv("OP_MCP_SMOKE_SCRIPT_ALLOWLIST")) {
+  if (
+    optionalEnv("OP_MCP_SMOKE_SCRIPT_ALLOWLIST") ||
+    optionalEnv("OP_MCP_SMOKE_SCRIPT_ALLOWLIST_MANIFEST")
+  ) {
     args.push("--enable-script-runner=true");
-    args.push(`--script-runner-allowlist=${requiredEnv("OP_MCP_SMOKE_SCRIPT_ALLOWLIST")}`);
+    if (optionalEnv("OP_MCP_SMOKE_SCRIPT_ALLOWLIST")) {
+      args.push(`--script-runner-allowlist=${requiredEnv("OP_MCP_SMOKE_SCRIPT_ALLOWLIST")}`);
+    }
+    if (optionalEnv("OP_MCP_SMOKE_SCRIPT_ALLOWLIST_MANIFEST")) {
+      args.push(
+        `--script-runner-allowlist-manifest=${requiredEnv("OP_MCP_SMOKE_SCRIPT_ALLOWLIST_MANIFEST")}`,
+      );
+    }
     args.push(`--script-runner-root=${requiredEnv("OP_MCP_SMOKE_SCRIPT_ROOT")}`);
     args.push(`--op-cli-path=${requiredEnv("OP_MCP_SMOKE_OP_CLI_PATH")}`);
   }

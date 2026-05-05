@@ -21,6 +21,7 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     enableScriptRunner: false,
     scriptRunnerRoots: [],
     scriptRunnerAllowlistPaths: [],
+    scriptRunnerAllowlistManifestPaths: [],
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "http",

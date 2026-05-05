@@ -28,6 +28,7 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     enableScriptRunner: true,
     scriptRunnerRoots: [],
     scriptRunnerAllowlistPaths: [],
+    scriptRunnerAllowlistManifestPaths: [],
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "stdio",
@@ -49,16 +50,31 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
 
 async function createWorkspace(allowlist: unknown): Promise<string> {
   const workspace = await mkdtemp(join(tmpdir(), "op-runner-test-"));
+  await writeAllowlist(workspace, allowlist);
+  return workspace;
+}
+
+async function writeAllowlist(workspace: string, allowlist: unknown): Promise<void> {
   await writeFile(
     join(workspace, SCRIPT_ALLOWLIST_FILENAME),
     JSON.stringify(allowlist, null, 2),
     "utf8",
   );
-  return workspace;
 }
 
 function allowlistPath(workspace: string): string {
   return join(workspace, SCRIPT_ALLOWLIST_FILENAME);
+}
+
+async function createWorkspaceUnder(
+  parent: string,
+  name: string,
+  allowlist: unknown,
+): Promise<string> {
+  const workspace = join(parent, name);
+  await mkdir(workspace, { recursive: true });
+  await writeAllowlist(workspace, allowlist);
+  return workspace;
 }
 
 function createScriptRunnerConfig(
@@ -164,6 +180,87 @@ test("loadConfiguredScriptAllowlists supports multiple workspaceRoots in one all
   assert.equal(allowlists.length, 2);
   assert.equal(allowlists[0]?.commands[0]?.id, "deploy");
   assert.equal(allowlists[1]?.commands[0]?.id, "deploy");
+});
+
+test("loadConfiguredScriptAllowlists resolves allowlists from startup manifests", async () => {
+  const trustedRoot = await mkdtemp(join(tmpdir(), "op-runner-manifest-root-"));
+  const workspaceA = await createWorkspaceUnder(trustedRoot, "project-a", {
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const workspaceB = await createWorkspaceUnder(trustedRoot, "project-b", {
+    version: 1,
+    commands: {
+      migrate: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const manifestPath = join(trustedRoot, "allowlists.json");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      allowlists: [
+        "project-a/.onepassword-mcp.json",
+        allowlistPath(workspaceB),
+      ],
+    }),
+    "utf8",
+  );
+
+  const allowlists = loadConfiguredScriptAllowlists(
+    createConfig({
+      scriptRunnerRoots: [trustedRoot],
+      scriptRunnerAllowlistPaths: [],
+      scriptRunnerAllowlistManifestPaths: [manifestPath],
+    }),
+  );
+  const workspaceAAllowlistPath = await realpath(allowlistPath(workspaceA));
+  const workspaceBAllowlistPath = await realpath(allowlistPath(workspaceB));
+
+  assert.equal(allowlists.length, 2);
+  assert.equal(allowlists[0]?.path, workspaceAAllowlistPath);
+  assert.equal(allowlists[0]?.commands[0]?.id, "deploy");
+  assert.equal(allowlists[1]?.path, workspaceBAllowlistPath);
+  assert.equal(allowlists[1]?.commands[0]?.id, "migrate");
+});
+
+test("loadConfiguredScriptAllowlists applies trusted roots to manifest entries", async () => {
+  const trustedRoot = await mkdtemp(join(tmpdir(), "op-runner-trusted-root-"));
+  const outsideWorkspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const manifestPath = join(trustedRoot, "allowlists.json");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      allowlists: [allowlistPath(outsideWorkspace)],
+    }),
+    "utf8",
+  );
+
+  assert.throws(
+    () =>
+      loadConfiguredScriptAllowlists(
+        createConfig({
+          scriptRunnerRoots: [trustedRoot],
+          scriptRunnerAllowlistPaths: [],
+          scriptRunnerAllowlistManifestPaths: [manifestPath],
+        }),
+      ),
+    /outside the configured script runner roots/,
+  );
 });
 
 test("DefaultOpScriptRunner rejects cwd outside workspace", async () => {
@@ -274,6 +371,62 @@ test("DefaultOpScriptRunner only observes allowlist edits after reload", async (
   assert.equal(reload.commandCount, 1);
   assert.equal(reloadedAllowlist.commands[0]?.id, "injected");
   await assert.rejects(() => runner.run(workspace, "deploy"), /not found/);
+});
+
+test("DefaultOpScriptRunner discovers new manifest allowlist entries after reload", async () => {
+  const trustedRoot = await mkdtemp(join(tmpdir(), "op-runner-manifest-root-"));
+  const workspaceA = await createWorkspaceUnder(trustedRoot, "project-a", {
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const workspaceB = await createWorkspaceUnder(trustedRoot, "project-b", {
+    version: 1,
+    commands: {
+      test: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const manifestPath = join(trustedRoot, "allowlists.json");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      allowlists: [allowlistPath(workspaceA)],
+    }),
+    "utf8",
+  );
+  const config = createConfig({
+    scriptRunnerRoots: [trustedRoot],
+    scriptRunnerAllowlistPaths: [],
+    scriptRunnerAllowlistManifestPaths: [manifestPath],
+  });
+  const processRunner = new FakeProcessRunner([]);
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  await assert.rejects(() => runner.list(workspaceB), /startup-configured/);
+
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      allowlists: [allowlistPath(workspaceA), allowlistPath(workspaceB)],
+    }),
+    "utf8",
+  );
+
+  const reload = runner.reload();
+  const allowlist = await runner.list(workspaceB);
+
+  assert.equal(reload.previousAllowlistCount, 1);
+  assert.equal(reload.allowlistCount, 2);
+  assert.equal(reload.commandCount, 2);
+  assert.equal(allowlist.commands[0]?.id, "test");
 });
 
 test("DefaultOpScriptRunner keeps active allowlists when reload fails", async () => {

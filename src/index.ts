@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   const scriptRunner = new DefaultOpScriptRunner(config);
 
   console.error(
-    `[mcp-1password] transport=${config.transport} auth=${config.authMode} reveal=${config.enableSecretReveal} writes=${config.enableWrites} destructive=${config.enableDestructiveActions} permissions=${config.enablePermissionMutation} scriptRunner=${config.enableScriptRunner} scriptAllowlists=${config.scriptRunnerAllowlistPaths.length} opAuth=${config.opCliAuthMode} audit=${config.auditLogPath}`,
+    `[mcp-1password] transport=${config.transport} auth=${config.authMode} reveal=${config.enableSecretReveal} writes=${config.enableWrites} destructive=${config.enableDestructiveActions} permissions=${config.enablePermissionMutation} scriptRunner=${config.enableScriptRunner} scriptAllowlists=${config.scriptRunnerAllowlistPaths.length} scriptAllowlistManifests=${config.scriptRunnerAllowlistManifestPaths.length} opAuth=${config.opCliAuthMode} audit=${config.auditLogPath}`,
   );
 
   if (config.transport === "http") {

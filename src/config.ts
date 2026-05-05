@@ -18,6 +18,7 @@ export interface ServerConfig {
   enableScriptRunner: boolean;
   scriptRunnerRoots: string[];
   scriptRunnerAllowlistPaths: string[];
+  scriptRunnerAllowlistManifestPaths: string[];
   opCliPath: string;
   opCliAuthMode: OpCliAuthMode;
   transport: TransportMode;
@@ -250,6 +251,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --enable-script-runner=true|false",
         "  --script-runner-root=<absolute trusted root> (repeatable)",
         "  --script-runner-allowlist=<absolute allowlist file> (repeatable)",
+        "  --script-runner-allowlist-manifest=<absolute manifest file> (repeatable)",
         "  --op-cli-path=<path>",
         "  --op-cli-auth-mode=auto|desktop|manual-session|service-account",
         "  --transport=stdio|http",
@@ -331,6 +333,13 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         process.env.OP_MCP_SCRIPT_RUNNER_ALLOWLISTS,
     ),
   ];
+  const scriptRunnerAllowlistManifestPaths = [
+    ...readFlagValues(argv, "script-runner-allowlist-manifest"),
+    ...parsePathList(
+      readFlagValue(argv, "script-runner-allowlist-manifests") ??
+        process.env.OP_MCP_SCRIPT_RUNNER_ALLOWLIST_MANIFESTS,
+    ),
+  ];
   const opCliPath = readFlagValue(argv, "op-cli-path") ?? process.env.OP_MCP_OP_CLI_PATH ?? "op";
   const opCliAuthMode = parseOpCliAuthMode(
     readFlagValue(argv, "op-cli-auth-mode") ?? process.env.OP_MCP_OP_CLI_AUTH_MODE,
@@ -395,9 +404,12 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
   }
 
   if (enableScriptRunner) {
-    if (scriptRunnerAllowlistPaths.length === 0) {
+    if (
+      scriptRunnerAllowlistPaths.length === 0 &&
+      scriptRunnerAllowlistManifestPaths.length === 0
+    ) {
       throw new Error(
-        "Script runner requires at least one --script-runner-allowlist absolute allowlist file.",
+        "Script runner requires at least one --script-runner-allowlist or --script-runner-allowlist-manifest absolute file.",
       );
     }
     for (const root of scriptRunnerRoots) {
@@ -408,6 +420,13 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     for (const allowlistPath of scriptRunnerAllowlistPaths) {
       if (!isAbsolute(allowlistPath)) {
         throw new Error(`Script runner allowlist path must be absolute: ${allowlistPath}`);
+      }
+    }
+    for (const manifestPath of scriptRunnerAllowlistManifestPaths) {
+      if (!isAbsolute(manifestPath)) {
+        throw new Error(
+          `Script runner allowlist manifest path must be absolute: ${manifestPath}`,
+        );
       }
     }
     if (!isAbsolute(opCliPath)) {
@@ -449,6 +468,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     enableScriptRunner,
     scriptRunnerRoots,
     scriptRunnerAllowlistPaths,
+    scriptRunnerAllowlistManifestPaths,
     opCliPath,
     opCliAuthMode,
     transport,

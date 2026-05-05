@@ -134,7 +134,7 @@ OP_MCP_SMOKE_OP_CLI_PATH="/absolute/path/to/op" \
 npm run smoke:real
 ```
 
-This validates `op_script_list` and `op_script_run` without returning command output.
+Use `OP_MCP_SMOKE_SCRIPT_ALLOWLIST_MANIFEST="/absolute/path/to/allowlists.json"` instead of `OP_MCP_SMOKE_SCRIPT_ALLOWLIST` to validate manifest-based startup configuration. This validates `op_script_list` and `op_script_run` without returning command output.
 
 ## Pass Criteria
 
