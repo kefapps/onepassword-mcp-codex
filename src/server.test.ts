@@ -31,7 +31,13 @@ import {
   PERMISSION_MUTATION_ACK,
   SECRET_REVEAL_ACK,
 } from "./constants.js";
-import type { OpScriptRunner, OpSessionStatus, ScriptAllowlist } from "./op-runner.js";
+import type {
+  OpScriptRunOptions,
+  OpScriptRunner,
+  OpSessionStatus,
+  ScriptAllowlistReloadResult,
+  ScriptAllowlist,
+} from "./op-runner.js";
 import { createOnePasswordMcpServer } from "./server.js";
 import type { OnePasswordService } from "./service.js";
 
@@ -220,13 +226,30 @@ class FakeOnePasswordService implements OnePasswordService {
     };
   }
 
-  public async secretResolve(_reference: string): Promise<string> {
+  public readonly secretResolveCalls: string[] = [];
+
+  public async secretResolve(reference: string): Promise<string> {
+    this.secretResolveCalls.push(reference);
+    if (reference.includes("supabase-db-password")) {
+      return "supabase-db-password-secret";
+    }
     return "resolved-secret";
   }
 }
 
 class FakeOpScriptRunner implements OpScriptRunner {
   public resetCalls = 0;
+  public reloadCalls = 0;
+  public lastRunOptions?: OpScriptRunOptions;
+  public nextStdout = "done\n";
+  public nextStderr = "";
+  public nextErrorMessage: string | undefined;
+  public nextReloadError: Error | undefined;
+  public reloadResult: ScriptAllowlistReloadResult = {
+    previousAllowlistCount: 1,
+    allowlistCount: 1,
+    commandCount: 2,
+  };
   public readonly allowlist: ScriptAllowlist = {
     path: "/workspace/.onepassword-mcp.json",
     workspaceRoot: "/workspace",
@@ -256,7 +279,21 @@ class FakeOpScriptRunner implements OpScriptRunner {
     return this.allowlist;
   }
 
-  public async run(workspaceRoot: string, commandId: string) {
+  public async run(
+    workspaceRoot: string,
+    commandId: string,
+    options: OpScriptRunOptions = {},
+  ) {
+    if (!this.allowlist.commands.some((command) => command.id === commandId)) {
+      throw new Error(`Allowlisted command ${commandId} not found.`);
+    }
+    this.lastRunOptions = options;
+    const redact = (text: string) =>
+      (options.secretRedactionValues ?? []).reduce(
+        (redacted, secret) => redacted.replaceAll(secret, "[REDACTED]"),
+        text,
+      );
+
     return {
       commandId,
       workspaceRoot,
@@ -266,8 +303,9 @@ class FakeOpScriptRunner implements OpScriptRunner {
       sensitiveOutput: commandId === "print-secret",
       authMode: "manual-session" as const,
       refreshedAuth: false,
-      stdout: "done\n",
-      stderr: "",
+      stdout: redact(this.nextStdout),
+      stderr: redact(this.nextStderr),
+      errorMessage: this.nextErrorMessage ? redact(this.nextErrorMessage) : undefined,
       exitCode: 0,
       signal: null,
       timedOut: false,
@@ -284,8 +322,18 @@ class FakeOpScriptRunner implements OpScriptRunner {
       accountConfigured: true,
       opCliPathConfigured: true,
       hasCachedSession: true,
+      manualSessionKnownValid: true,
+      manualSessionMarkedInvalid: false,
       desktopValidated: false,
     };
+  }
+
+  public reload(): ScriptAllowlistReloadResult {
+    this.reloadCalls += 1;
+    if (this.nextReloadError) {
+      throw this.nextReloadError;
+    }
+    return this.reloadResult;
   }
 
   public reset(): void {
@@ -359,13 +407,34 @@ function readTextResource(
 test("registers expected tools", async () => {
   const { client } = await createClientAndServer();
   const tools = await client.listTools();
+  const passwordReadTool = tools.tools.find((tool) => tool.name === "password_read");
+  const secretRevealTool = tools.tools.find((tool) => tool.name === "secret_reveal");
+  const passwordReadProperties =
+    (passwordReadTool?.inputSchema as { properties?: Record<string, unknown> })
+      .properties ?? {};
+  const secretRevealProperties =
+    (secretRevealTool?.inputSchema as { properties?: Record<string, unknown> })
+      .properties ?? {};
+  const passwordReadDescription = passwordReadTool?.description ?? "";
+  const secretRevealDescription = secretRevealTool?.description ?? "";
+
   assert(tools.tools.some((tool) => tool.name === "sdk_capabilities"));
   assert(tools.tools.some((tool) => tool.name === "secret_reveal"));
   assert(tools.tools.some((tool) => tool.name === "vault_permissions_get"));
   assert(tools.tools.some((tool) => tool.name === "password_generate"));
   assert(tools.tools.some((tool) => tool.name === "password_read"));
+  assert(tools.tools.some((tool) => tool.name === "op_session_status"));
+  assert("secretReference" in passwordReadProperties);
+  assert("vaultId" in passwordReadProperties);
+  assert("reference" in secretRevealProperties);
+  assert("fieldId" in secretRevealProperties);
+  assert.match(passwordReadDescription, /reveal=true will fail/);
+  assert.match(passwordReadDescription, /op_script_run/);
+  assert.match(secretRevealDescription, /Plaintext reveal is disabled/);
+  assert.match(secretRevealDescription, /op_script_run/);
   assert(!tools.tools.some((tool) => tool.name === "password_update"));
   assert(!tools.tools.some((tool) => tool.name === "op_script_run"));
+  assert(!tools.tools.some((tool) => tool.name === "op_script_reload_allowlists"));
 });
 
 test("registers write tools only when enabled", async () => {
@@ -387,9 +456,54 @@ test("registers script runner tools when enabled", async () => {
   const tools = await client.listTools();
 
   assert(tools.tools.some((tool) => tool.name === "op_script_list"));
+  assert(tools.tools.some((tool) => tool.name === "op_script_reload_allowlists"));
   assert(tools.tools.some((tool) => tool.name === "op_script_run"));
   assert(tools.tools.some((tool) => tool.name === "op_session_status"));
   assert(tools.tools.some((tool) => tool.name === "op_session_reset"));
+
+  const secretRevealTool = tools.tools.find((tool) => tool.name === "secret_reveal");
+  assert.match(secretRevealTool?.description ?? "", /Plaintext reveal is disabled/);
+  assert.match(secretRevealTool?.description ?? "", /op_script_list/);
+  assert.match(secretRevealTool?.description ?? "", /envSecretRefs/);
+});
+
+test("plaintext reveal tool descriptions reflect enabled runtime gates", async () => {
+  const { client } = await createClientAndServer(true, {
+    enableScriptRunner: true,
+    scriptRunner: new FakeOpScriptRunner(),
+  });
+  const tools = await client.listTools();
+  const passwordReadTool = tools.tools.find((tool) => tool.name === "password_read");
+  const secretRevealTool = tools.tools.find((tool) => tool.name === "secret_reveal");
+
+  assert.match(passwordReadTool?.description ?? "", /Plaintext reveal is enabled/);
+  assert.doesNotMatch(passwordReadTool?.description ?? "", /will fail/);
+  assert.match(secretRevealTool?.description ?? "", /Return a secret in plaintext/);
+  assert.doesNotMatch(secretRevealTool?.description ?? "", /Plaintext reveal is disabled/);
+  assert.match(secretRevealTool?.description ?? "", /op_script_run/);
+});
+
+test("op_session_status exposes runtime gates when script runner is disabled", async () => {
+  const { client } = await createClientAndServer(false);
+  const status = await client.callTool({
+    name: "op_session_status",
+    arguments: {},
+  });
+  const payload = status.structuredContent as {
+    secretRevealEnabled: boolean;
+    writesEnabled: boolean;
+    destructiveActionsEnabled: boolean;
+    permissionMutationEnabled: boolean;
+    scriptRunnerEnabled: boolean;
+    scriptRunnerAllowlistCount: number;
+  };
+
+  assert.equal(payload.secretRevealEnabled, false);
+  assert.equal(payload.writesEnabled, false);
+  assert.equal(payload.destructiveActionsEnabled, false);
+  assert.equal(payload.permissionMutationEnabled, false);
+  assert.equal(payload.scriptRunnerEnabled, false);
+  assert.equal(payload.scriptRunnerAllowlistCount, 1);
 });
 
 test("registers prompts and resources", async () => {
@@ -473,6 +587,11 @@ test("secret reveal is blocked when disabled", async () => {
   });
 
   assert.equal(result.isError, true);
+  const textContent = result.content as Array<{ type: string; text?: string }>;
+  assert.match(textContent[0]?.text ?? "", /OP_MCP_ENABLE_SECRET_REVEAL=true/);
+  assert.match(textContent[0]?.text ?? "", /--enable-secret-reveal=true/);
+  assert.match(textContent[0]?.text ?? "", /op_script_run/);
+  assert.match(textContent[0]?.text ?? "", /envSecretRefs/);
 });
 
 test("password read stays redacted by default", async () => {
@@ -489,11 +608,18 @@ test("password read stays redacted by default", async () => {
     mode: string;
     valueState: string;
     field: string;
+    secretConsumptionGuidance: {
+      preferredPath: string;
+      plaintextRevealEnabled: boolean;
+      scriptRunnerEnabled: boolean;
+    };
   };
 
   assert.equal(payload.mode, "item-field");
   assert.equal(payload.valueState, "redacted");
   assert.equal(payload.field, "password");
+  assert.equal(payload.secretConsumptionGuidance.preferredPath, "op_script_run");
+  assert.equal(payload.secretConsumptionGuidance.plaintextRevealEnabled, false);
 });
 
 test("password read reveal is blocked when disabled", async () => {
@@ -510,6 +636,9 @@ test("password read reveal is blocked when disabled", async () => {
   });
 
   assert.equal(result.isError, true);
+  const textContent = result.content as Array<{ type: string; text?: string }>;
+  assert.match(textContent[0]?.text ?? "", /op_script_run/);
+  assert.match(textContent[0]?.text ?? "", /envSecretRefs/);
 });
 
 test("password read reveal succeeds and audits when enabled", async () => {
@@ -815,6 +944,159 @@ test("script runner lists and runs allowlisted commands with audit", async () =>
   assert.equal(auditLogger.events.at(-1)?.outcome, "success");
 });
 
+test("script runner reloads allowlists with audit", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  const { client, auditLogger } = await createClientAndServer(false, {
+    enableScriptRunner: true,
+    scriptRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_script_reload_allowlists",
+    arguments: {
+      reason: "Need to pick up an edited allowlist file",
+    },
+  });
+  const payload = result.structuredContent as {
+    reloaded: boolean;
+    configuredAllowlistPathCount: number;
+    previousAllowlistCount: number;
+    allowlistCount: number;
+    commandCount: number;
+  };
+  const auditEvent = auditLogger.events.at(-1);
+
+  assert.notEqual(result.isError, true);
+  assert.equal(scriptRunner.reloadCalls, 1);
+  assert.equal(payload.reloaded, true);
+  assert.equal(payload.configuredAllowlistPathCount, 1);
+  assert.equal(payload.previousAllowlistCount, 1);
+  assert.equal(payload.allowlistCount, 1);
+  assert.equal(payload.commandCount, 2);
+  assert.equal(auditEvent?.action, "op_script_reload_allowlists");
+  assert.equal(auditEvent?.outcome, "success");
+  assert.equal(
+    auditEvent?.metadata.reason,
+    "Need to pick up an edited allowlist file",
+  );
+});
+
+test("script runner audits failed allowlist reloads", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  scriptRunner.nextReloadError = new Error("invalid allowlist");
+  const { client, auditLogger } = await createClientAndServer(false, {
+    enableScriptRunner: true,
+    scriptRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_script_reload_allowlists",
+    arguments: {
+      reason: "Need to validate a changed allowlist file",
+    },
+  });
+  const auditEvent = auditLogger.events.at(-1);
+
+  assert.equal(result.isError, true);
+  assert.equal(scriptRunner.reloadCalls, 1);
+  assert.equal(auditEvent?.action, "op_script_reload_allowlists");
+  assert.equal(auditEvent?.outcome, "error");
+  assert.match(auditEvent?.errorMessage ?? "", /invalid allowlist/);
+});
+
+test("script runner injects 1Password secrets without returning plaintext", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  scriptRunner.nextStdout = "connected with supabase-db-password-secret\n";
+  const { client, auditLogger, service } = await createClientAndServer(false, {
+    enableScriptRunner: true,
+    scriptRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      commandId: "deploy",
+      reason: "Need Supabase migration secrets",
+      envSecretRefs: {
+        SUPABASE_DB_PASSWORD: "op://vault/supabase-db-password/password",
+      },
+      returnOutput: true,
+      acknowledgePlaintext: SECRET_REVEAL_ACK,
+    },
+  });
+  const payload = result.structuredContent as {
+    stdout: string;
+    envSecretRefCount: number;
+    injectedSecretEnvVars: string[];
+  };
+  const auditPayload = JSON.stringify(auditLogger.events.at(-1));
+
+  assert.equal(result.isError, false);
+  assert.equal(service.secretResolveCalls[0], "op://vault/supabase-db-password/password");
+  assert.equal(
+    scriptRunner.lastRunOptions?.extraEnv?.SUPABASE_DB_PASSWORD,
+    "supabase-db-password-secret",
+  );
+  assert.deepEqual(scriptRunner.lastRunOptions?.secretRedactionValues, [
+    "supabase-db-password-secret",
+  ]);
+  assert.equal(payload.stdout, "connected with [REDACTED]\n");
+  assert.equal(payload.envSecretRefCount, 1);
+  assert.deepEqual(payload.injectedSecretEnvVars, ["SUPABASE_DB_PASSWORD"]);
+  assert.match(auditPayload, /"referenceScheme":"op"/);
+  assert.match(auditPayload, /"referenceHash":"[a-f0-9]{64}"/);
+  assert(!auditPayload.includes("op://vault/supabase-db-password/password"));
+  assert(!auditPayload.includes("supabase-db-password-secret"));
+});
+
+test("script runner refuses output for injected secrets without acknowledgement", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  const { client, service } = await createClientAndServer(false, {
+    enableScriptRunner: true,
+    scriptRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      commandId: "deploy",
+      reason: "Need Supabase migration secrets",
+      envSecretRefs: {
+        SUPABASE_DB_PASSWORD: "op://vault/supabase-db-password/password",
+      },
+      returnOutput: true,
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(service.secretResolveCalls.length, 0);
+  assert.equal(scriptRunner.lastRunOptions, undefined);
+});
+
+test("script runner refuses non-allowlisted commands", async () => {
+  const { client, service } = await createClientAndServer(false, {
+    enableScriptRunner: true,
+    scriptRunner: new FakeOpScriptRunner(),
+  });
+
+  const result = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      commandId: "missing",
+      reason: "Need to verify allowlist refusal",
+      envSecretRefs: {
+        SUPABASE_DB_PASSWORD: "op://vault/supabase-db-password/password",
+      },
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(service.secretResolveCalls.length, 0);
+});
+
 test("script runner only returns command output with reveal acknowledgement", async () => {
   const scriptRunner = new FakeOpScriptRunner();
   const { client } = await createClientAndServer(true, {
@@ -872,8 +1154,22 @@ test("script runner exposes and resets non-secret session status", async () => {
     name: "op_session_status",
     arguments: {},
   });
-  const statusPayload = status.structuredContent as { hasCachedSession: boolean };
+  const statusPayload = status.structuredContent as {
+    hasCachedSession: boolean;
+    secretRevealEnabled: boolean;
+    scriptRunnerEnabled: boolean;
+    scriptRunnerAllowlistCount: number;
+    secretConsumptionGuidance: {
+      preferredPath: string;
+      scriptRunnerEnabled: boolean;
+    };
+  };
   assert.equal(statusPayload.hasCachedSession, true);
+  assert.equal(statusPayload.secretRevealEnabled, false);
+  assert.equal(statusPayload.scriptRunnerEnabled, true);
+  assert.equal(statusPayload.scriptRunnerAllowlistCount, 1);
+  assert.equal(statusPayload.secretConsumptionGuidance.preferredPath, "op_script_run");
+  assert.equal(statusPayload.secretConsumptionGuidance.scriptRunnerEnabled, true);
 
   await client.callTool({
     name: "op_session_reset",
