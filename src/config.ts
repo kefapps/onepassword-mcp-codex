@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
+import { UNRESTRICTED_RUNNER_ACK } from "./constants.js";
 
 export type AuthMode = "desktop" | "service-account";
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -19,6 +20,13 @@ export interface ServerConfig {
   scriptRunnerRoots: string[];
   scriptRunnerAllowlistPaths: string[];
   scriptRunnerAllowlistManifestPaths: string[];
+  enableUnrestrictedRunner: boolean;
+  unrestrictedRunnerRoots: string[];
+  unrestrictedRunnerRequireSessionApproval: boolean;
+  unrestrictedRunnerApprovalHost: string;
+  unrestrictedRunnerApprovalPort: number;
+  unrestrictedRunnerApprovalTtlMs: number;
+  unrestrictedRunnerCommandTimeoutMs: number;
   opCliPath: string;
   opCliAuthMode: OpCliAuthMode;
   transport: TransportMode;
@@ -158,13 +166,17 @@ function parseTransportMode(value: string | undefined): TransportMode {
 }
 
 function parseHttpPort(value: string | undefined): number {
+  return parsePort("HTTP port", value, 17337);
+}
+
+function parsePort(name: string, value: string | undefined, fallback: number): number {
   if (!value) {
-    return 17337;
+    return fallback;
   }
 
   const port = Number(value);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
-    throw new Error(`Invalid HTTP port: ${value}`);
+    throw new Error(`Invalid ${name}: ${value}`);
   }
   return port;
 }
@@ -252,6 +264,14 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --script-runner-root=<absolute trusted root> (repeatable)",
         "  --script-runner-allowlist=<absolute allowlist file> (repeatable)",
         "  --script-runner-allowlist-manifest=<absolute manifest file> (repeatable)",
+        "  --enable-unrestricted-runner=true|false",
+        "  --unrestricted-runner-root=<absolute trusted root> (repeatable)",
+        "  --unrestricted-runner-require-session-approval=true|false",
+        "  --unrestricted-runner-approval-host=<localhost host>",
+        "  --unrestricted-runner-approval-port=<port>",
+        "  --unrestricted-runner-approval-ttl-ms=<milliseconds>",
+        "  --unrestricted-runner-command-timeout-ms=<milliseconds>",
+        "  --acknowledge-unrestricted-runner=<acknowledgement>",
         "  --op-cli-path=<path>",
         "  --op-cli-auth-mode=auto|desktop|manual-session|service-account",
         "  --transport=stdio|http",
@@ -340,6 +360,52 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         process.env.OP_MCP_SCRIPT_RUNNER_ALLOWLIST_MANIFESTS,
     ),
   ];
+  const enableUnrestrictedRunner = parseBoolean(
+    readFlagValue(argv, "enable-unrestricted-runner") ??
+      process.env.OP_MCP_ENABLE_UNRESTRICTED_RUNNER,
+    false,
+  );
+  const unrestrictedRunnerRoots = [
+    ...readFlagValues(argv, "unrestricted-runner-root"),
+    ...parsePathList(
+      readFlagValue(argv, "unrestricted-runner-roots") ??
+        process.env.OP_MCP_UNRESTRICTED_RUNNER_ROOTS,
+    ),
+  ];
+  const unrestrictedRunnerRequireSessionApproval = parseBoolean(
+    readFlagValue(argv, "unrestricted-runner-require-session-approval") ??
+      process.env.OP_MCP_UNRESTRICTED_RUNNER_REQUIRE_SESSION_APPROVAL,
+    true,
+  );
+  const unrestrictedRunnerApprovalHost =
+    readFlagValue(argv, "unrestricted-runner-approval-host") ??
+    process.env.OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_HOST ??
+    "127.0.0.1";
+  const unrestrictedRunnerApprovalPort = parsePort(
+    "unrestricted runner approval port",
+    readFlagValue(argv, "unrestricted-runner-approval-port") ??
+      process.env.OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_PORT,
+    0,
+  );
+  const unrestrictedRunnerApprovalTtlMs = parseIntegerOption(
+    "unrestricted runner approval TTL",
+    readFlagValue(argv, "unrestricted-runner-approval-ttl-ms") ??
+      process.env.OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_TTL_MS,
+    12 * 60 * 60_000,
+    1_000,
+    7 * 24 * 60 * 60_000,
+  );
+  const unrestrictedRunnerCommandTimeoutMs = parseIntegerOption(
+    "unrestricted runner command timeout",
+    readFlagValue(argv, "unrestricted-runner-command-timeout-ms") ??
+      process.env.OP_MCP_UNRESTRICTED_RUNNER_COMMAND_TIMEOUT_MS,
+    600_000,
+    1_000,
+    60 * 60_000,
+  );
+  const unrestrictedRunnerStartupAcknowledgement =
+    readFlagValue(argv, "acknowledge-unrestricted-runner") ??
+    process.env.OP_MCP_ACKNOWLEDGE_UNRESTRICTED_RUNNER;
   const opCliPath = readFlagValue(argv, "op-cli-path") ?? process.env.OP_MCP_OP_CLI_PATH ?? "op";
   const opCliAuthMode = parseOpCliAuthMode(
     readFlagValue(argv, "op-cli-auth-mode") ?? process.env.OP_MCP_OP_CLI_AUTH_MODE,
@@ -451,6 +517,32 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     }
   }
 
+  if (enableUnrestrictedRunner) {
+    if (unrestrictedRunnerRoots.length === 0) {
+      throw new Error(
+        "Unrestricted runner requires at least one --unrestricted-runner-root absolute path.",
+      );
+    }
+    for (const root of unrestrictedRunnerRoots) {
+      if (!isAbsolute(root)) {
+        throw new Error(`Unrestricted runner root must be absolute: ${root}`);
+      }
+    }
+    if (!isLocalHttpHost(unrestrictedRunnerApprovalHost)) {
+      throw new Error(
+        "Unrestricted runner approval host must be localhost, 127.0.0.1, or ::1.",
+      );
+    }
+    if (
+      !unrestrictedRunnerRequireSessionApproval &&
+      unrestrictedRunnerStartupAcknowledgement !== UNRESTRICTED_RUNNER_ACK
+    ) {
+      throw new Error(
+        `Disabling unrestricted runner session approval requires --acknowledge-unrestricted-runner=${UNRESTRICTED_RUNNER_ACK}.`,
+      );
+    }
+  }
+
   const auditLogPath =
     readFlagValue(argv, "audit-log-path") ??
     process.env.OP_MCP_AUDIT_LOG_PATH ??
@@ -469,6 +561,13 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     scriptRunnerRoots,
     scriptRunnerAllowlistPaths,
     scriptRunnerAllowlistManifestPaths,
+    enableUnrestrictedRunner,
+    unrestrictedRunnerRoots,
+    unrestrictedRunnerRequireSessionApproval,
+    unrestrictedRunnerApprovalHost,
+    unrestrictedRunnerApprovalPort,
+    unrestrictedRunnerApprovalTtlMs,
+    unrestrictedRunnerCommandTimeoutMs,
     opCliPath,
     opCliAuthMode,
     transport,

@@ -24,6 +24,7 @@ import {
   GENERATED_SECRET_ACK,
   PERMISSION_MUTATION_ACK,
   SECRET_REVEAL_ACK,
+  UNRESTRICTED_RUNNER_ACK,
 } from "./constants.js";
 import { registerOnePasswordPrompts } from "./mcp-prompts.js";
 import { registerOnePasswordResources } from "./mcp-resources.js";
@@ -47,6 +48,11 @@ import {
 } from "./permissions.js";
 import { redactItem, redactItemOverview, redactVault } from "./redaction.js";
 import type { OnePasswordService } from "./service.js";
+import {
+  DefaultUnrestrictedRunner,
+  UnrestrictedApprovalManager,
+  type UnrestrictedRunner,
+} from "./unrestricted-runner.js";
 
 const websiteSchema = z.object({
   url: z.string().min(1),
@@ -277,6 +283,14 @@ function assertScriptRunnerEnabled(config: ServerConfig): void {
   }
 }
 
+function assertUnrestrictedRunnerEnabled(config: ServerConfig): void {
+  if (!config.enableUnrestrictedRunner) {
+    throw new Error(
+      "The unrestricted runner is disabled. Restart the server with --enable-unrestricted-runner=true to allow this tool.",
+    );
+  }
+}
+
 function assertWritesEnabled(config: ServerConfig): void {
   if (!config.enableWrites) {
     throw new Error(
@@ -419,7 +433,11 @@ function secretReferenceScheme(reference: string): string {
 }
 
 function secretReferenceHash(reference: string): string {
-  return createHash("sha256").update(reference).digest("hex");
+  return sha256Hash(reference);
+}
+
+function sha256Hash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function summarizeEnvSecretRefs(envSecretRefs: Record<string, string>) {
@@ -666,11 +684,64 @@ function scriptRunStructuredContent(
   };
 }
 
+function unrestrictedRunStructuredContent(
+  result: {
+    workspaceRoot: string;
+    configuredRoot: string;
+    cwd: string;
+    command: string;
+    shell: string;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    timedOut: boolean;
+    outputTruncated: boolean;
+    durationMs: number;
+    sensitiveOutput: boolean;
+    stdout: string;
+    stderr: string;
+    errorMessage?: string;
+  },
+  outputPolicy: ScriptOutputPolicy,
+): Record<string, unknown> {
+  return {
+    workspaceRoot: result.workspaceRoot,
+    configuredRoot: result.configuredRoot,
+    cwd: result.cwd,
+    commandHash: sha256Hash(result.command),
+    commandLength: result.command.length,
+    shell: result.shell,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    outputTruncated: result.outputTruncated,
+    durationMs: result.durationMs,
+    sensitiveOutput: result.sensitiveOutput,
+    outputRequested: outputPolicy.requested,
+    outputReturned: outputPolicy.returned,
+    ...(outputPolicy.returned
+      ? {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          errorMessage: result.errorMessage,
+        }
+      : {
+          outputState: outputPolicy.state,
+          ...(outputPolicy.requiredAcknowledgement
+            ? { requiredAcknowledgement: outputPolicy.requiredAcknowledgement }
+            : {}),
+        }),
+  };
+}
+
 export function createOnePasswordMcpServer(
   config: ServerConfig,
   service: OnePasswordService,
   auditLogger: AuditLogger,
   scriptRunner: OpScriptRunner = new DefaultOpScriptRunner(config),
+  unrestrictedRunner: UnrestrictedRunner = new DefaultUnrestrictedRunner(
+    config,
+    new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs),
+  ),
 ): McpServer {
   const server = new McpServer({
     name: "mcp-1password",
@@ -696,6 +767,13 @@ export function createOnePasswordMcpServer(
         scriptRunnerEnabled: config.enableScriptRunner,
         scriptRunnerAllowlistManifestCount:
           config.scriptRunnerAllowlistManifestPaths.length,
+        unrestrictedRunnerEnabled: config.enableUnrestrictedRunner,
+        unrestrictedRunnerRootCount: config.unrestrictedRunnerRoots.length,
+        unrestrictedRunnerRequireSessionApproval:
+          config.unrestrictedRunnerRequireSessionApproval,
+        unrestrictedRunnerApprovalTtlMs: config.unrestrictedRunnerApprovalTtlMs,
+        unrestrictedRunnerCommandTimeoutMs:
+          config.unrestrictedRunnerCommandTimeoutMs,
         transport: config.transport,
         httpPath: config.httpPath,
         httpRequireBearer: config.httpRequireBearer,
@@ -716,6 +794,7 @@ export function createOnePasswordMcpServer(
     },
     async () => {
       const status = scriptRunner.status();
+      const unrestrictedStatus = unrestrictedRunner.status();
       return jsonResult({
         ...status,
         secretRevealEnabled: config.enableSecretReveal,
@@ -729,6 +808,7 @@ export function createOnePasswordMcpServer(
           config.scriptRunnerAllowlistPaths.length,
         scriptRunnerAllowlistManifestCount:
           config.scriptRunnerAllowlistManifestPaths.length,
+        unrestrictedRunner: unrestrictedStatus,
         secretConsumptionGuidance: secretConsumptionGuidance(config),
       });
     },
@@ -920,6 +1000,104 @@ export function createOnePasswordMcpServer(
           reset: true,
           status: scriptRunner.status(),
         });
+      },
+    );
+  }
+
+  if (config.enableUnrestrictedRunner) {
+    server.registerTool(
+      "op_unrestricted_run",
+      {
+        description:
+          "Run a free-form local shell command from a startup-configured unrestricted runner root after explicit local session approval. This is intentionally dangerous: the configured path is an approval scope, not an operating-system sandbox, and commands are not allowlisted. 1Password secrets are not injected; prefer op_script_run for secret-consuming commands. If returnOutput=true is requested without plaintext acknowledgement, the command still runs once and stdout/stderr is withheld.",
+        inputSchema: {
+          workspaceRoot: z.string().min(1),
+          command: z.string().min(1),
+          reason: z.string().min(3),
+          returnOutput: z.boolean().optional(),
+          acknowledgePlaintext: z.string().optional(),
+        },
+      },
+      async ({
+        workspaceRoot,
+        command,
+        reason,
+        returnOutput,
+        acknowledgePlaintext,
+      }) => {
+        assertUnrestrictedRunnerEnabled(config);
+
+        try {
+          const authorization = await unrestrictedRunner.authorization(workspaceRoot);
+          if (authorization) {
+            recordAudit(
+              auditLogger,
+              "op_unrestricted_run_authorization_required",
+              "success",
+              {
+                workspaceRoot: authorization.workspaceRoot,
+                configuredRoot: authorization.configuredRoot,
+                commandHash: sha256Hash(command),
+                commandLength: command.length,
+                reason,
+                requiredAcknowledgement: UNRESTRICTED_RUNNER_ACK,
+              },
+            );
+            return jsonResult(authorization);
+          }
+
+          const outputPolicy = resolveScriptOutputPolicy(
+            returnOutput,
+            true,
+            acknowledgePlaintext,
+          );
+          const result = await unrestrictedRunner.run(workspaceRoot, command);
+          const outcome =
+            result.exitCode === 0 && !result.timedOut ? "success" : "error";
+          recordAudit(auditLogger, "op_unrestricted_run", outcome, {
+            workspaceRoot: result.workspaceRoot,
+            configuredRoot: result.configuredRoot,
+            cwd: result.cwd,
+            commandHash: sha256Hash(command),
+            commandLength: command.length,
+            shell: result.shell,
+            reason,
+            durationMs: result.durationMs,
+            exitCode: result.exitCode,
+            signal: result.signal,
+            timedOut: result.timedOut,
+            outputTruncated: result.outputTruncated,
+            sensitiveOutput: result.sensitiveOutput,
+            outputRequested: outputPolicy.requested,
+            outputReturned: outputPolicy.returned,
+            outputState: outputPolicy.state,
+            ...(outputPolicy.requiredAcknowledgement
+              ? { requiredAcknowledgement: outputPolicy.requiredAcknowledgement }
+              : {}),
+          }, result.errorMessage);
+
+          return {
+            ...textResult(
+              commandOutputText(result, outputPolicy),
+              unrestrictedRunStructuredContent(result, outputPolicy),
+            ),
+            isError: outcome === "error",
+          };
+        } catch (error) {
+          recordAudit(
+            auditLogger,
+            "op_unrestricted_run",
+            "error",
+            {
+              workspaceRoot,
+              commandHash: sha256Hash(command),
+              commandLength: command.length,
+              reason,
+            },
+            String(error),
+          );
+          throw error;
+        }
       },
     );
   }
