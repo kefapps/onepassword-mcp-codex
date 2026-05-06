@@ -1059,8 +1059,10 @@ test("script runner injects 1Password secrets without returning plaintext", asyn
   assert(!auditPayload.includes("supabase-db-password-secret"));
 });
 
-test("script runner refuses output for injected secrets without acknowledgement", async () => {
+test("script runner withholds output for injected secrets without acknowledgement", async () => {
   const scriptRunner = new FakeOpScriptRunner();
+  scriptRunner.nextStdout = "connected with supabase-db-password-secret\n";
+  scriptRunner.nextErrorMessage = "failed with supabase-db-password-secret";
   const { client, service } = await createClientAndServer(false, {
     enableScriptRunner: true,
     scriptRunner,
@@ -1078,10 +1080,33 @@ test("script runner refuses output for injected secrets without acknowledgement"
       returnOutput: true,
     },
   });
+  const textContent = result.content as Array<{ type: string; text?: string }>;
+  const payload = result.structuredContent as {
+    outputRequested: boolean;
+    outputReturned: boolean;
+    outputState: string;
+    requiredAcknowledgement: string;
+    stdout?: string;
+    errorMessage?: string;
+    envSecretRefCount: number;
+    injectedSecretEnvVars: string[];
+  };
 
-  assert.equal(result.isError, true);
-  assert.equal(service.secretResolveCalls.length, 0);
-  assert.equal(scriptRunner.lastRunOptions, undefined);
+  assert.notEqual(result.isError, true);
+  assert.equal(service.secretResolveCalls[0], "op://vault/supabase-db-password/password");
+  assert.equal(
+    scriptRunner.lastRunOptions?.extraEnv?.SUPABASE_DB_PASSWORD,
+    "supabase-db-password-secret",
+  );
+  assert.match(textContent[0]?.text ?? "", /requires acknowledgePlaintext/);
+  assert.equal(payload.outputRequested, true);
+  assert.equal(payload.outputReturned, false);
+  assert.equal(payload.outputState, "withheld_ack_missing");
+  assert.equal(payload.requiredAcknowledgement, SECRET_REVEAL_ACK);
+  assert.equal(payload.stdout, undefined);
+  assert.equal(payload.errorMessage, undefined);
+  assert.equal(payload.envSecretRefCount, 1);
+  assert.deepEqual(payload.injectedSecretEnvVars, ["SUPABASE_DB_PASSWORD"]);
 });
 
 test("script runner refuses non-allowlisted commands", async () => {
@@ -1133,10 +1158,13 @@ test("script runner only returns command output with reveal acknowledgement", as
   assert.equal(payload.stdout, "done\n");
 });
 
-test("script runner blocks output return without reveal acknowledgement", async () => {
+test("script runner withholds sensitive output without reveal acknowledgement", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  scriptRunner.nextStdout = "secret output\n";
+  scriptRunner.nextErrorMessage = "secret error";
   const { client } = await createClientAndServer(false, {
     enableScriptRunner: true,
-    scriptRunner: new FakeOpScriptRunner(),
+    scriptRunner,
   });
 
   const result = await client.callTool({
@@ -1148,8 +1176,23 @@ test("script runner blocks output return without reveal acknowledgement", async 
       returnOutput: true,
     },
   });
+  const payload = result.structuredContent as {
+    outputRequested: boolean;
+    outputReturned: boolean;
+    outputState: string;
+    requiredAcknowledgement: string;
+    stdout?: string;
+    errorMessage?: string;
+  };
 
-  assert.equal(result.isError, true);
+  assert.notEqual(result.isError, true);
+  assert.equal(scriptRunner.lastRunOptions !== undefined, true);
+  assert.equal(payload.outputRequested, true);
+  assert.equal(payload.outputReturned, false);
+  assert.equal(payload.outputState, "withheld_ack_missing");
+  assert.equal(payload.requiredAcknowledgement, SECRET_REVEAL_ACK);
+  assert.equal(payload.stdout, undefined);
+  assert.equal(payload.errorMessage, undefined);
 });
 
 test("script runner exposes and resets non-secret session status", async () => {

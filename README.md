@@ -152,7 +152,7 @@ Create a `.onepassword-mcp.json` file at the root of your project:
 - The directory containing `command` is not automatically prepended to `PATH`. Use absolute paths in scripts, or configure `--op-cli-path` so the directory containing `op` can be injected.
 - `sensitiveOutput: true` withholds stdout/stderr from the agent unless `returnOutput=true` is explicitly requested with reveal acknowledgement.
 - `op_script_run` accepts an optional `envSecretRefs` object that maps environment variable names to `op://` references. The server resolves those references, injects only the values into the child process environment, and never returns or audits the plaintext values.
-- `returnOutput=true` does not require startup secret reveal for ordinary output, but when `envSecretRefs` is provided or the command has `sensitiveOutput: true`, the call must include `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT"`. Returned stdout/stderr/error messages are redacted by exact secret value.
+- `returnOutput=true` does not require startup secret reveal for ordinary output. When `envSecretRefs` is provided or the command has `sensitiveOutput: true`, stdout/stderr/error messages are returned only with `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT"`; without that acknowledgement, the command still runs once and output is withheld with `outputState: "withheld_ack_missing"`. Returned stdout/stderr/error messages are redacted by exact secret value.
 - After editing a startup-configured allowlist file, call `op_script_reload_allowlists` with a reason. If the edited file is invalid, the reload fails and the previous in-memory allowlist remains active.
 
 ### Allowlist Manifest Format
@@ -196,7 +196,7 @@ This keeps the plaintext secret out of the model transcript while still letting 
 - **Bearer token comparison uses `crypto.timingSafeEqual`** to reduce timing attack risk.
 - **HTTP binds to localhost (`127.0.0.1`) by default.** It validates the `Origin` header, caps active sessions, expires idle sessions, and returns generic messages for server errors.
 - **Resources and capabilities avoid sensitive local metadata.** Local paths, 1Password account names, HTTP host/port, and the `op` binary path are not exposed to MCP clients.
-- **`errorMessage` for scripts with `sensitiveOutput: true` is withheld** unless `returnOutput=true` is explicitly requested.
+- **`errorMessage` for scripts with `sensitiveOutput: true` is withheld** unless output is explicitly requested with plaintext acknowledgement.
 
 ## MCP Resource Notes
 
