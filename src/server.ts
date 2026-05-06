@@ -346,20 +346,46 @@ function passwordReadDescription(config: ServerConfig): string {
   );
 }
 
-function assertPlaintextOutputAcknowledged(
-  includeOutput: boolean,
+type ScriptOutputState = "returned" | "withheld" | "withheld_ack_missing";
+
+interface ScriptOutputPolicy {
+  requested: boolean;
+  returned: boolean;
+  state: ScriptOutputState;
+  requiredAcknowledgement?: string;
+}
+
+function resolveScriptOutputPolicy(
+  returnOutput: boolean | undefined,
   requiresAcknowledgement: boolean,
   acknowledgePlaintext?: string,
-): void {
+): ScriptOutputPolicy {
+  const requested = returnOutput ?? false;
+  if (!requested) {
+    return {
+      requested,
+      returned: false,
+      state: "withheld",
+    };
+  }
+
   if (
-    includeOutput &&
     requiresAcknowledgement &&
     acknowledgePlaintext !== SECRET_REVEAL_ACK
   ) {
-    throw new Error(
-      `returnOutput=true with secret injection or sensitive output requires acknowledgePlaintext=${SECRET_REVEAL_ACK}.`,
-    );
+    return {
+      requested,
+      returned: false,
+      state: "withheld_ack_missing",
+      requiredAcknowledgement: SECRET_REVEAL_ACK,
+    };
   }
+
+  return {
+    requested,
+    returned: true,
+    state: "returned",
+  };
 }
 
 function validateEnvSecretRefs(
@@ -548,23 +574,31 @@ function commandOutputText(result: {
   outputTruncated: boolean;
   sensitiveOutput: boolean;
   errorMessage?: string;
-}, includeOutput: boolean): string {
+}, outputPolicy: ScriptOutputPolicy): string {
   const sections: string[] = [];
 
-  if (includeOutput && result.stdout) {
+  if (outputPolicy.returned && result.stdout) {
     sections.push(result.stdout.trimEnd());
   }
-  if (includeOutput && result.stderr) {
+  if (outputPolicy.returned && result.stderr) {
     sections.push(result.stderr.trimEnd());
   }
-  if (result.errorMessage && (includeOutput || !result.sensitiveOutput)) {
+  if (
+    result.errorMessage &&
+    (outputPolicy.returned ||
+      (!result.sensitiveOutput && outputPolicy.state !== "withheld_ack_missing"))
+  ) {
     sections.push(result.errorMessage);
   }
   if (sections.length === 0) {
     sections.push(`Command completed with exit code ${result.exitCode ?? "unknown"}.`);
   }
-  if (!includeOutput) {
-    sections.push("Command stdout/stderr withheld by default.");
+  if (!outputPolicy.returned) {
+    sections.push(
+      outputPolicy.state === "withheld_ack_missing"
+        ? `Command stdout/stderr withheld because returnOutput=true with secret injection or sensitive output requires acknowledgePlaintext=${SECRET_REVEAL_ACK}.`
+        : "Command stdout/stderr withheld by default.",
+    );
   }
   if (result.timedOut) {
     sections.push("Command timed out.");
@@ -593,8 +627,13 @@ function scriptRunStructuredContent(
     stderr: string;
     errorMessage?: string;
   },
-  includeOutput: boolean,
+  outputPolicy: ScriptOutputPolicy,
 ): Record<string, unknown> {
+  const includeWithheldErrorMessage =
+    result.errorMessage &&
+    !result.sensitiveOutput &&
+    outputPolicy.state !== "withheld_ack_missing";
+
   return {
     commandId: result.commandId,
     workspaceRoot: result.workspaceRoot,
@@ -607,16 +646,20 @@ function scriptRunStructuredContent(
     durationMs: result.durationMs,
     refreshedAuth: result.refreshedAuth,
     sensitiveOutput: result.sensitiveOutput,
-    outputReturned: includeOutput,
-    ...(includeOutput
+    outputRequested: outputPolicy.requested,
+    outputReturned: outputPolicy.returned,
+    ...(outputPolicy.returned
       ? {
           stdout: result.stdout,
           stderr: result.stderr,
           errorMessage: result.errorMessage,
         }
       : {
-          outputState: "withheld",
-          ...(result.errorMessage && !result.sensitiveOutput
+          outputState: outputPolicy.state,
+          ...(outputPolicy.requiredAcknowledgement
+            ? { requiredAcknowledgement: outputPolicy.requiredAcknowledgement }
+            : {}),
+          ...(includeWithheldErrorMessage
             ? { errorMessage: result.errorMessage }
             : {}),
         }),
@@ -761,7 +804,7 @@ export function createOnePasswordMcpServer(
       "op_script_run",
       {
         description:
-          `Run one currently loaded startup-configured allowlisted script with 1Password CLI auth injected by the MCP process. ${SCRIPT_RUNNER_SECRET_HINT} Use this instead of password_read reveal or secret_reveal when the secret only needs to be passed to a script. No free-form shell commands are accepted.`,
+          `Run one currently loaded startup-configured allowlisted script with 1Password CLI auth injected by the MCP process. ${SCRIPT_RUNNER_SECRET_HINT} Use this instead of password_read reveal or secret_reveal when the secret only needs to be passed to a script. No free-form shell commands are accepted. If returnOutput=true is requested for secret-injected or sensitive output without plaintext acknowledgement, the command still runs once and output is withheld.`,
         inputSchema: {
           workspaceRoot: z.string().min(1),
           commandId: z.string().min(1),
@@ -789,10 +832,9 @@ export function createOnePasswordMcpServer(
           envSecretReferences = summarizeEnvSecretRefs(validatedEnvSecretRefs);
           injectedSecretEnvVars = envSecretReferences.map((entry) => entry.envVar);
 
-          const includeOutput = returnOutput ?? false;
           const command = await getAllowlistedCommand(scriptRunner, workspaceRoot, commandId);
-          assertPlaintextOutputAcknowledged(
-            includeOutput,
+          const outputPolicy = resolveScriptOutputPolicy(
+            returnOutput,
             envSecretReferences.length > 0 || command?.sensitiveOutput === true,
             acknowledgePlaintext,
           );
@@ -823,17 +865,22 @@ export function createOnePasswordMcpServer(
             outputTruncated: result.outputTruncated,
             refreshedAuth: result.refreshedAuth,
             sensitiveOutput: result.sensitiveOutput,
-            outputReturned: includeOutput,
+            outputRequested: outputPolicy.requested,
+            outputReturned: outputPolicy.returned,
+            outputState: outputPolicy.state,
             envSecretRefCount: envSecretReferences.length,
             injectedSecretEnvVars,
             envSecretReferences,
+            ...(outputPolicy.requiredAcknowledgement
+              ? { requiredAcknowledgement: outputPolicy.requiredAcknowledgement }
+              : {}),
           }, result.errorMessage);
 
           return {
             ...textResult(
-              commandOutputText(result, includeOutput),
+              commandOutputText(result, outputPolicy),
               {
-                ...scriptRunStructuredContent(result, includeOutput),
+                ...scriptRunStructuredContent(result, outputPolicy),
                 envSecretRefCount: envSecretReferences.length,
                 injectedSecretEnvVars,
               },
