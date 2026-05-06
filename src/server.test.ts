@@ -30,6 +30,7 @@ import {
   GENERATED_SECRET_ACK,
   PERMISSION_MUTATION_ACK,
   SECRET_REVEAL_ACK,
+  UNRESTRICTED_RUNNER_ACK,
 } from "./constants.js";
 import type {
   OpScriptRunOptions,
@@ -40,6 +41,12 @@ import type {
 } from "./op-runner.js";
 import { createOnePasswordMcpServer } from "./server.js";
 import type { OnePasswordService } from "./service.js";
+import type {
+  UnrestrictedAuthorizationRequired,
+  UnrestrictedRunResult,
+  UnrestrictedRunner,
+  UnrestrictedRunnerStatus,
+} from "./unrestricted-runner.js";
 
 class FakeOnePasswordService implements OnePasswordService {
   public item: Item = {
@@ -343,14 +350,64 @@ class FakeOpScriptRunner implements OpScriptRunner {
   }
 }
 
+class FakeUnrestrictedRunner implements UnrestrictedRunner {
+  public nextAuthorization?: UnrestrictedAuthorizationRequired;
+  public lastCommand?: string;
+  public nextStdout = "unrestricted done\n";
+  public nextStderr = "";
+  public nextErrorMessage: string | undefined;
+  public nextExitCode: number | null = 0;
+
+  public async authorization(
+    _workspaceRoot: string,
+  ): Promise<UnrestrictedAuthorizationRequired | undefined> {
+    return this.nextAuthorization;
+  }
+
+  public async run(workspaceRoot: string, command: string): Promise<UnrestrictedRunResult> {
+    this.lastCommand = command;
+    return {
+      workspaceRoot,
+      configuredRoot: "/workspace",
+      cwd: workspaceRoot,
+      command,
+      shell: "/bin/sh",
+      shellArgs: ["-lc", command],
+      sensitiveOutput: true,
+      stdout: this.nextStdout,
+      stderr: this.nextStderr,
+      errorMessage: this.nextErrorMessage,
+      exitCode: this.nextExitCode,
+      signal: null,
+      timedOut: false,
+      outputTruncated: false,
+      durationMs: 21,
+    };
+  }
+
+  public status(): UnrestrictedRunnerStatus {
+    return {
+      enabled: true,
+      configuredRootCount: 1,
+      requireSessionApproval: true,
+      approvalServerAvailable: true,
+      approvedRootCount: this.nextAuthorization ? 0 : 1,
+      approvalTtlMs: 12 * 60 * 60_000,
+      commandTimeoutMs: 600_000,
+    };
+  }
+}
+
 async function createClientAndServer(
   enableSecretReveal = false,
   options: {
     enableScriptRunner?: boolean;
+    enableUnrestrictedRunner?: boolean;
     enableWrites?: boolean;
     enableDestructiveActions?: boolean;
     enablePermissionMutation?: boolean;
     scriptRunner?: OpScriptRunner;
+    unrestrictedRunner?: UnrestrictedRunner;
   } = {},
 ) {
   const config: ServerConfig = {
@@ -364,6 +421,13 @@ async function createClientAndServer(
     scriptRunnerRoots: ["/workspace"],
     scriptRunnerAllowlistPaths: ["/workspace/.onepassword-mcp.json"],
     scriptRunnerAllowlistManifestPaths: [],
+    enableUnrestrictedRunner: options.enableUnrestrictedRunner ?? false,
+    unrestrictedRunnerRoots: ["/workspace"],
+    unrestrictedRunnerRequireSessionApproval: true,
+    unrestrictedRunnerApprovalHost: "127.0.0.1",
+    unrestrictedRunnerApprovalPort: 0,
+    unrestrictedRunnerApprovalTtlMs: 12 * 60 * 60_000,
+    unrestrictedRunnerCommandTimeoutMs: 600_000,
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "stdio",
@@ -387,6 +451,7 @@ async function createClientAndServer(
     service,
     auditLogger,
     options.scriptRunner,
+    options.unrestrictedRunner,
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({
@@ -438,6 +503,7 @@ test("registers expected tools", async () => {
   assert(!tools.tools.some((tool) => tool.name === "password_update"));
   assert(!tools.tools.some((tool) => tool.name === "op_script_run"));
   assert(!tools.tools.some((tool) => tool.name === "op_script_reload_allowlists"));
+  assert(!tools.tools.some((tool) => tool.name === "op_unrestricted_run"));
 });
 
 test("registers write tools only when enabled", async () => {
@@ -468,6 +534,19 @@ test("registers script runner tools when enabled", async () => {
   assert.match(secretRevealTool?.description ?? "", /Plaintext reveal is disabled/);
   assert.match(secretRevealTool?.description ?? "", /op_script_list/);
   assert.match(secretRevealTool?.description ?? "", /envSecretRefs/);
+});
+
+test("registers unrestricted runner tool only when enabled", async () => {
+  const { client } = await createClientAndServer(false, {
+    enableUnrestrictedRunner: true,
+    unrestrictedRunner: new FakeUnrestrictedRunner(),
+  });
+  const tools = await client.listTools();
+  const tool = tools.tools.find((entry) => entry.name === "op_unrestricted_run");
+
+  assert(tool);
+  assert.match(tool.description ?? "", /free-form local shell command/);
+  assert.match(tool.description ?? "", /not an operating-system sandbox/);
 });
 
 test("plaintext reveal tool descriptions reflect enabled runtime gates", async () => {
@@ -501,6 +580,10 @@ test("op_session_status exposes runtime gates when script runner is disabled", a
     scriptRunnerAllowlistCount: number;
     scriptRunnerConfiguredAllowlistPathCount: number;
     scriptRunnerAllowlistManifestCount: number;
+    unrestrictedRunner: {
+      enabled: boolean;
+      configuredRootCount: number;
+    };
   };
 
   assert.equal(payload.secretRevealEnabled, false);
@@ -511,6 +594,8 @@ test("op_session_status exposes runtime gates when script runner is disabled", a
   assert.equal(payload.scriptRunnerAllowlistCount, 0);
   assert.equal(payload.scriptRunnerConfiguredAllowlistPathCount, 1);
   assert.equal(payload.scriptRunnerAllowlistManifestCount, 0);
+  assert.equal(payload.unrestrictedRunner.enabled, false);
+  assert.equal(payload.unrestrictedRunner.configuredRootCount, 0);
 });
 
 test("registers prompts and resources", async () => {
@@ -1228,6 +1313,118 @@ test("script runner exposes and resets non-secret session status", async () => {
     arguments: {},
   });
   assert.equal(scriptRunner.resetCalls, 1);
+});
+
+test("unrestricted runner returns local approval URL before running", async () => {
+  const unrestrictedRunner = new FakeUnrestrictedRunner();
+  unrestrictedRunner.nextAuthorization = {
+    authorizationRequired: true,
+    approvalUrl: "http://127.0.0.1:19000/approve?token=test-token",
+    workspaceRoot: "/workspace",
+    configuredRoot: "/workspace",
+    acknowledgement: UNRESTRICTED_RUNNER_ACK,
+    warning: "Approval permits arbitrary local command execution.",
+    expiresAt: "2026-05-06T00:00:00.000Z",
+  };
+  const { client, auditLogger } = await createClientAndServer(false, {
+    enableUnrestrictedRunner: true,
+    unrestrictedRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_unrestricted_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      command: "npm test",
+      reason: "Need broad command execution in this worktree",
+    },
+  });
+  const payload = result.structuredContent as {
+    authorizationRequired: boolean;
+    approvalUrl: string;
+    acknowledgement: string;
+  };
+
+  assert.notEqual(result.isError, true);
+  assert.equal(payload.authorizationRequired, true);
+  assert.equal(payload.approvalUrl, "http://127.0.0.1:19000/approve?token=test-token");
+  assert.equal(payload.acknowledgement, UNRESTRICTED_RUNNER_ACK);
+  assert.equal(unrestrictedRunner.lastCommand, undefined);
+  assert.equal(
+    auditLogger.events.at(-1)?.action,
+    "op_unrestricted_run_authorization_required",
+  );
+});
+
+test("unrestricted runner executes once and withholds output without plaintext acknowledgement", async () => {
+  const unrestrictedRunner = new FakeUnrestrictedRunner();
+  unrestrictedRunner.nextStdout = "token-like output\n";
+  unrestrictedRunner.nextErrorMessage = "sensitive error";
+  const { client, auditLogger } = await createClientAndServer(false, {
+    enableUnrestrictedRunner: true,
+    unrestrictedRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_unrestricted_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      command: "printf token-like-output",
+      reason: "Need broad command execution in this worktree",
+      returnOutput: true,
+    },
+  });
+  const textContent = result.content as Array<{ type: string; text?: string }>;
+  const payload = result.structuredContent as {
+    outputRequested: boolean;
+    outputReturned: boolean;
+    outputState: string;
+    requiredAcknowledgement: string;
+    stdout?: string;
+    errorMessage?: string;
+    commandHash: string;
+  };
+  const auditPayload = auditLogger.events.at(-1)?.metadata ?? {};
+
+  assert.notEqual(result.isError, true);
+  assert.equal(unrestrictedRunner.lastCommand, "printf token-like-output");
+  assert.match(textContent[0]?.text ?? "", /requires acknowledgePlaintext/);
+  assert.equal(payload.outputRequested, true);
+  assert.equal(payload.outputReturned, false);
+  assert.equal(payload.outputState, "withheld_ack_missing");
+  assert.equal(payload.requiredAcknowledgement, SECRET_REVEAL_ACK);
+  assert.equal(payload.stdout, undefined);
+  assert.equal(payload.errorMessage, undefined);
+  assert.match(payload.commandHash, /^[a-f0-9]{64}$/);
+  assert.equal(auditPayload.commandLength, "printf token-like-output".length);
+  assert(!JSON.stringify(auditPayload).includes("printf token-like-output"));
+});
+
+test("unrestricted runner returns output with plaintext acknowledgement", async () => {
+  const unrestrictedRunner = new FakeUnrestrictedRunner();
+  const { client } = await createClientAndServer(false, {
+    enableUnrestrictedRunner: true,
+    unrestrictedRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_unrestricted_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      command: "echo unrestricted",
+      reason: "Need broad command execution in this worktree",
+      returnOutput: true,
+      acknowledgePlaintext: SECRET_REVEAL_ACK,
+    },
+  });
+  const payload = result.structuredContent as {
+    stdout: string;
+    outputReturned: boolean;
+  };
+
+  assert.equal(result.isError, false);
+  assert.equal(payload.outputReturned, true);
+  assert.equal(payload.stdout, "unrestricted done\n");
 });
 
 function findPasswordValue(item: Item, fieldId: string): string | undefined {

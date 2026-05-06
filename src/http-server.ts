@@ -7,6 +7,11 @@ import type { ServerConfig } from "./config.js";
 import type { OpScriptRunner } from "./op-runner.js";
 import { createOnePasswordMcpServer } from "./server.js";
 import type { OnePasswordService } from "./service.js";
+import {
+  DefaultUnrestrictedRunner,
+  UnrestrictedApprovalManager,
+  type UnrestrictedRunner,
+} from "./unrestricted-runner.js";
 
 const MAX_HTTP_BODY_BYTES = 1024 * 1024;
 
@@ -191,6 +196,10 @@ export async function startOnePasswordHttpServer(
   service: OnePasswordService,
   auditLogger: AuditLogger,
   scriptRunner: OpScriptRunner,
+  unrestrictedRunner: UnrestrictedRunner = new DefaultUnrestrictedRunner(
+    config,
+    new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs),
+  ),
 ): Promise<OnePasswordHttpServerHandle> {
   const transports = new Map<string, SessionEntry>();
   const clearSession = (sessionId: string): void => {
@@ -284,6 +293,7 @@ export async function startOnePasswordHttpServer(
           service,
           auditLogger,
           scriptRunner,
+          unrestrictedRunner,
         );
         await mcpServer.connect(transport);
       }

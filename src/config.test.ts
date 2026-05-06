@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseConfig } from "./config.js";
+import { UNRESTRICTED_RUNNER_ACK } from "./constants.js";
 
 const ENV_KEYS = [
   "OP_MCP_ACCOUNT",
@@ -17,6 +18,14 @@ const ENV_KEYS = [
   "OP_MCP_HTTP_SESSION_IDLE_MS",
   "OP_MCP_HTTP_REQUEST_TIMEOUT_MS",
   "OP_MCP_SCRIPT_RUNNER_ALLOWLIST_MANIFESTS",
+  "OP_MCP_ENABLE_UNRESTRICTED_RUNNER",
+  "OP_MCP_UNRESTRICTED_RUNNER_ROOTS",
+  "OP_MCP_UNRESTRICTED_RUNNER_REQUIRE_SESSION_APPROVAL",
+  "OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_HOST",
+  "OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_PORT",
+  "OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_TTL_MS",
+  "OP_MCP_UNRESTRICTED_RUNNER_COMMAND_TIMEOUT_MS",
+  "OP_MCP_ACKNOWLEDGE_UNRESTRICTED_RUNNER",
 ] as const;
 
 function withCleanAuthEnv(callback: () => void): void {
@@ -50,6 +59,13 @@ test("parseConfig keeps write and script runner gates disabled by default", () =
   assert.deepEqual(config.scriptRunnerRoots, []);
   assert.deepEqual(config.scriptRunnerAllowlistPaths, []);
   assert.deepEqual(config.scriptRunnerAllowlistManifestPaths, []);
+  assert.equal(config.enableUnrestrictedRunner, false);
+  assert.deepEqual(config.unrestrictedRunnerRoots, []);
+  assert.equal(config.unrestrictedRunnerRequireSessionApproval, true);
+  assert.equal(config.unrestrictedRunnerApprovalHost, "127.0.0.1");
+  assert.equal(config.unrestrictedRunnerApprovalPort, 0);
+  assert.equal(config.unrestrictedRunnerApprovalTtlMs, 12 * 60 * 60_000);
+  assert.equal(config.unrestrictedRunnerCommandTimeoutMs, 600_000);
   assert.equal(config.transport, "stdio");
   assert.equal(config.httpHost, "127.0.0.1");
   assert.equal(config.httpPort, 17337);
@@ -203,6 +219,103 @@ test("parseConfig accepts startup allowlist manifests", () => {
   assert.deepEqual(config.scriptRunnerAllowlistManifestPaths, [
     "/tmp/onepassword-mcp-manifest.json",
   ]);
+});
+
+test("parseConfig accepts unrestricted runner configuration with session approval", () => {
+  const config = parseConfig(
+    [
+      "--account",
+      "TestAccount",
+      "--enable-unrestricted-runner=true",
+      "--unrestricted-runner-root=/tmp/project",
+      "--unrestricted-runner-approval-host=localhost",
+      "--unrestricted-runner-approval-port=19000",
+      "--unrestricted-runner-approval-ttl-ms=3600000",
+      "--unrestricted-runner-command-timeout-ms=120000",
+    ],
+    "0.1.0",
+  );
+
+  assert.equal(config.enableUnrestrictedRunner, true);
+  assert.deepEqual(config.unrestrictedRunnerRoots, ["/tmp/project"]);
+  assert.equal(config.unrestrictedRunnerRequireSessionApproval, true);
+  assert.equal(config.unrestrictedRunnerApprovalHost, "localhost");
+  assert.equal(config.unrestrictedRunnerApprovalPort, 19000);
+  assert.equal(config.unrestrictedRunnerApprovalTtlMs, 3_600_000);
+  assert.equal(config.unrestrictedRunnerCommandTimeoutMs, 120_000);
+});
+
+test("parseConfig validates unrestricted runner roots and approval bypass", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--account",
+          "TestAccount",
+          "--enable-unrestricted-runner=true",
+        ],
+        "0.1.0",
+      ),
+    /unrestricted-runner-root/,
+  );
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--account",
+          "TestAccount",
+          "--enable-unrestricted-runner=true",
+          "--unrestricted-runner-root=relative",
+        ],
+        "0.1.0",
+      ),
+    /root must be absolute/,
+  );
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--account",
+          "TestAccount",
+          "--enable-unrestricted-runner=true",
+          "--unrestricted-runner-root=/tmp/project",
+          "--unrestricted-runner-approval-host=0.0.0.0",
+        ],
+        "0.1.0",
+      ),
+    /approval host must be localhost/,
+  );
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--account",
+          "TestAccount",
+          "--enable-unrestricted-runner=true",
+          "--unrestricted-runner-root=/tmp/project",
+          "--unrestricted-runner-require-session-approval=false",
+        ],
+        "0.1.0",
+      ),
+    /acknowledge-unrestricted-runner/,
+  );
+});
+
+test("parseConfig accepts explicit unrestricted runner approval bypass acknowledgement", () => {
+  const config = parseConfig(
+    [
+      "--account",
+      "TestAccount",
+      "--enable-unrestricted-runner=true",
+      "--unrestricted-runner-root=/tmp/project",
+      "--unrestricted-runner-require-session-approval=false",
+      `--acknowledge-unrestricted-runner=${UNRESTRICTED_RUNNER_ACK}`,
+    ],
+    "0.1.0",
+  );
+
+  assert.equal(config.enableUnrestrictedRunner, true);
+  assert.equal(config.unrestrictedRunnerRequireSessionApproval, false);
 });
 
 test("parseConfig requires a bearer token for HTTP transport by default", () => {

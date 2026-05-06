@@ -14,6 +14,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes
 - Reveal plaintext secrets only on explicit request with a per-call acknowledgement.
 - Generate plaintext passwords only with a reason and explicit acknowledgement.
 - Run pre-approved scripts with injected 1Password CLI authentication.
+- Optionally run unrestricted local shell commands under explicitly approved workspace roots, after local browser confirmation.
 - Use stdio by default, or a local/single-user HTTP transport protected by a bearer token.
 - Write a JSONL audit log for sensitive actions at `~/.onepassword-mcp/audit.jsonl`.
 
@@ -108,6 +109,14 @@ Every flag can also be set through an environment variable.
 | `--script-runner-allowlist` | `OP_MCP_SCRIPT_RUNNER_ALLOWLISTS` | - | Absolute path to an allowlist file; repeatable |
 | `--script-runner-allowlist-manifest` | `OP_MCP_SCRIPT_RUNNER_ALLOWLIST_MANIFESTS` | - | Absolute path to a manifest listing allowlist files; repeatable |
 | `--script-runner-root` | `OP_MCP_SCRIPT_RUNNER_ROOTS` | - | Trusted workspace root; repeatable |
+| `--enable-unrestricted-runner` | `OP_MCP_ENABLE_UNRESTRICTED_RUNNER` | `false` | Allow the separate free-form shell command runner |
+| `--unrestricted-runner-root` | `OP_MCP_UNRESTRICTED_RUNNER_ROOTS` | - | Root path eligible for unrestricted execution approval; repeatable |
+| `--unrestricted-runner-require-session-approval` | `OP_MCP_UNRESTRICTED_RUNNER_REQUIRE_SESSION_APPROVAL` | `true` | Require local approval page before commands can run |
+| `--unrestricted-runner-approval-host` | `OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_HOST` | `127.0.0.1` | Local approval server bind host; localhost only |
+| `--unrestricted-runner-approval-port` | `OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_PORT` | `0` | Local approval server port; `0` picks a free port |
+| `--unrestricted-runner-approval-ttl-ms` | `OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_TTL_MS` | `43200000` | In-memory approval lifetime |
+| `--unrestricted-runner-command-timeout-ms` | `OP_MCP_UNRESTRICTED_RUNNER_COMMAND_TIMEOUT_MS` | `600000` | Free-form command timeout |
+| `--acknowledge-unrestricted-runner` | `OP_MCP_ACKNOWLEDGE_UNRESTRICTED_RUNNER` | - | Required only when disabling session approval; exact value: `I_UNDERSTAND_THIS_ALLOWS_UNRESTRICTED_LOCAL_COMMAND_EXECUTION` |
 | `--op-cli-path` | `OP_MCP_OP_CLI_PATH` | `op` | Path to the `op` binary; must be absolute when the script runner is enabled |
 | `--op-cli-auth-mode` | `OP_MCP_OP_CLI_AUTH_MODE` | `auto` | `auto`, `desktop`, `manual-session`, or `service-account` |
 | `--transport` | `OP_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
@@ -182,17 +191,53 @@ When an agent needs a secret only to run a local command, it should not call `pa
 
 This keeps the plaintext secret out of the model transcript while still letting the command receive it.
 
+## Unrestricted Runner
+
+The unrestricted runner is a separate, dangerous escape hatch for trusted local worktrees where allowlisting every command is too expensive. Enable it only for roots you are willing to approve for arbitrary command execution:
+
+```bash
+mcp-1password \
+  --auth-mode=desktop \
+  --account="My Account" \
+  --enable-unrestricted-runner=true \
+  --unrestricted-runner-root=/absolute/path/to/trusted/worktree
+```
+
+When an MCP client first calls `op_unrestricted_run` for a configured root, the tool returns `authorizationRequired: true` and a local `approvalUrl`. Open that URL on the same machine, tick the risk checkbox, and type:
+
+```text
+I_UNDERSTAND_THIS_ALLOWS_UNRESTRICTED_LOCAL_COMMAND_EXECUTION
+```
+
+That approval is in memory only and expires after `--unrestricted-runner-approval-ttl-ms`. It is not written to config. The configured root is an approval scope, not an operating-system sandbox: approved commands run with your normal OS permissions and can still `cd`, read, write, or execute outside that path if the OS allows it.
+
+`op_unrestricted_run` starts the command in the requested workspace root through `/bin/sh -lc` on Unix-like systems, with a minimal inherited environment and no 1Password secret injection. Use `op_script_run` when a command needs 1Password values injected safely. As with script output, `returnOutput=true` without `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT"` still runs the command once but withholds stdout/stderr.
+
+You can disable the browser approval page only with an explicit startup acknowledgement:
+
+```bash
+mcp-1password \
+  --auth-mode=desktop \
+  --account="My Account" \
+  --enable-unrestricted-runner=true \
+  --unrestricted-runner-root=/absolute/path/to/trusted/worktree \
+  --unrestricted-runner-require-session-approval=false \
+  --acknowledge-unrestricted-runner=I_UNDERSTAND_THIS_ALLOWS_UNRESTRICTED_LOCAL_COMMAND_EXECUTION
+```
+
 ## Security Model
 
 - **Secrets are opaque by default.** Item fields are returned with `valueState: "redacted"` unless `--enable-secret-reveal=true` is passed.
 - **Plaintext reveal requires explicit consent.** Tools that return secrets require `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT"`.
 - **Password generators return a new plaintext secret.** They require `reason` and `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_GENERATED_SECRET_PLAINTEXT"`, and audit the action without logging the secret.
 - **Destructive actions and permission mutations require per-call acknowledgement.** Use `acknowledgeDestructive: "I_UNDERSTAND_THIS_CAN_DELETE_1PASSWORD_DATA"` for archive/delete operations and `acknowledgePermissionMutation: "I_UNDERSTAND_THIS_CAN_CHANGE_1PASSWORD_PERMISSIONS"` for permissions.
-- **Dangerous capabilities are opt-in and disabled by default**, including writes, destructive actions, permission mutation, secret reveal, and the script runner.
+- **Dangerous capabilities are opt-in and disabled by default**, including writes, destructive actions, permission mutation, secret reveal, the script runner, and the unrestricted runner.
 - **Every sensitive action is audited** to a JSONL file. Secret references and auth tokens are automatically redacted from logs.
 - **The script runner uses `spawn` with `shell: false`**, so shell injection is not available. Commands must be allowlisted and use absolute paths.
 - **Allowlist reloads are bounded and audited.** `op_script_reload_allowlists` only reloads direct allowlist paths and manifest trust anchors configured at startup, records the reload reason, and keeps the previous in-memory allowlist if validation fails.
 - **Script secret injection is run-only.** `envSecretRefs` values are resolved in memory, injected into the allowlisted child process, redacted from returned output, and audited only by env var name, reference scheme, and reference hash.
+- **Unrestricted runner approval is local and in-memory.** `op_unrestricted_run` requires a configured root plus browser approval by default. Audit entries store command hashes and lengths rather than the raw free-form command.
+- **Unrestricted runner roots are not a sandbox.** The root limits which worktrees can request approval; it does not prevent an approved command from touching other paths allowed by the operating system.
 - **Bearer token comparison uses `crypto.timingSafeEqual`** to reduce timing attack risk.
 - **HTTP binds to localhost (`127.0.0.1`) by default.** It validates the `Origin` header, caps active sessions, expires idle sessions, and returns generic messages for server errors.
 - **Resources and capabilities avoid sensitive local metadata.** Local paths, 1Password account names, HTTP host/port, and the `op` binary path are not exposed to MCP clients.

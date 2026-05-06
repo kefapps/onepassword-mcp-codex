@@ -10,6 +10,11 @@ import { startOnePasswordHttpServer } from "./http-server.js";
 import { DefaultOpScriptRunner } from "./op-runner.js";
 import { createOnePasswordMcpServer } from "./server.js";
 import { SdkOnePasswordService } from "./service.js";
+import {
+  DefaultUnrestrictedRunner,
+  UnrestrictedApprovalManager,
+  startUnrestrictedApprovalServer,
+} from "./unrestricted-runner.js";
 
 function readPackageVersion(): string {
   const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -25,10 +30,27 @@ async function main(): Promise<void> {
   const auditLogger = new FileAuditLogger(config.auditLogPath);
   const service = new SdkOnePasswordService(config);
   const scriptRunner = new DefaultOpScriptRunner(config);
+  const unrestrictedApprovalManager = new UnrestrictedApprovalManager(
+    config.unrestrictedRunnerApprovalTtlMs,
+  );
+  const unrestrictedApprovalServer = await startUnrestrictedApprovalServer(
+    config,
+    unrestrictedApprovalManager,
+    auditLogger,
+  );
+  const unrestrictedRunner = new DefaultUnrestrictedRunner(
+    config,
+    unrestrictedApprovalManager,
+  );
 
   console.error(
-    `[mcp-1password] transport=${config.transport} auth=${config.authMode} reveal=${config.enableSecretReveal} writes=${config.enableWrites} destructive=${config.enableDestructiveActions} permissions=${config.enablePermissionMutation} scriptRunner=${config.enableScriptRunner} scriptAllowlists=${config.scriptRunnerAllowlistPaths.length} scriptAllowlistManifests=${config.scriptRunnerAllowlistManifestPaths.length} opAuth=${config.opCliAuthMode} audit=${config.auditLogPath}`,
+    `[mcp-1password] transport=${config.transport} auth=${config.authMode} reveal=${config.enableSecretReveal} writes=${config.enableWrites} destructive=${config.enableDestructiveActions} permissions=${config.enablePermissionMutation} scriptRunner=${config.enableScriptRunner} scriptAllowlists=${config.scriptRunnerAllowlistPaths.length} scriptAllowlistManifests=${config.scriptRunnerAllowlistManifestPaths.length} unrestrictedRunner=${config.enableUnrestrictedRunner} unrestrictedRoots=${config.unrestrictedRunnerRoots.length} unrestrictedApproval=${config.unrestrictedRunnerRequireSessionApproval} opAuth=${config.opCliAuthMode} audit=${config.auditLogPath}`,
   );
+  if (unrestrictedApprovalServer) {
+    console.error(
+      `[mcp-1password] unrestricted runner approval listening on ${unrestrictedApprovalServer.url}`,
+    );
+  }
 
   if (config.transport === "http") {
     const httpServer = await startOnePasswordHttpServer(
@@ -36,6 +58,7 @@ async function main(): Promise<void> {
       service,
       auditLogger,
       scriptRunner,
+      unrestrictedRunner,
     );
     console.error(`[mcp-1password] listening on ${httpServer.url}`);
 
@@ -50,6 +73,7 @@ async function main(): Promise<void> {
 
     const shutdown = async () => {
       await httpServer.close();
+      await unrestrictedApprovalServer?.close();
       process.exit(0);
     };
     process.once("SIGINT", () => {
@@ -61,7 +85,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  const server = createOnePasswordMcpServer(config, service, auditLogger, scriptRunner);
+  const server = createOnePasswordMcpServer(
+    config,
+    service,
+    auditLogger,
+    scriptRunner,
+    unrestrictedRunner,
+  );
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
