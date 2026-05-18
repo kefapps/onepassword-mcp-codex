@@ -135,6 +135,8 @@ function mapItemCategory(category: string | undefined): ItemCategory {
       return ItemCategory.MedicalRecord;
     case "SSH_KEY":
       return ItemCategory.SshKey;
+    case "DOCUMENT":
+      return ItemCategory.Document;
     default:
       return ItemCategory.Unsupported;
   }
@@ -182,8 +184,10 @@ function toConnectCategory(category: ItemCategory): string {
       return "MEDICAL_RECORD";
     case ItemCategory.SshKey:
       return "SSH_KEY";
+    case ItemCategory.Document:
+      return "DOCUMENT";
     default:
-      return "SECURE_NOTE";
+      throw new Error(`Unsupported 1Password item category for Connect: ${category}`);
   }
 }
 
