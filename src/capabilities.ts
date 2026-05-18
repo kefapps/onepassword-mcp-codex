@@ -112,12 +112,24 @@ export function effectiveSupportedTools(config: ServerConfig): string[] {
   const capabilities = backendCapabilities(config);
   return SDK_CAPABILITIES.supportedTools.filter((tool) => {
     if (
-      (tool === "vault_create" || tool === "vault_update") &&
-      !capabilities.vaultMutation
+      (tool === "password_create" ||
+        tool === "password_update" ||
+        tool === "item_create" ||
+        tool === "item_update") &&
+      !config.enableWrites
     ) {
       return false;
     }
-    if (tool === "vault_delete" && !capabilities.vaultDestructive) {
+    if (
+      (tool === "vault_create" || tool === "vault_update") &&
+      (!config.enableWrites || !capabilities.vaultMutation)
+    ) {
+      return false;
+    }
+    if (
+      tool === "vault_delete" &&
+      (!config.enableDestructiveActions || !capabilities.vaultDestructive)
+    ) {
       return false;
     }
     if (
@@ -130,7 +142,7 @@ export function effectiveSupportedTools(config: ServerConfig): string[] {
       (tool === "vault_permissions_grant_group" ||
         tool === "vault_permissions_update_group" ||
         tool === "vault_permissions_revoke_group") &&
-      !capabilities.permissionMutation
+      (!config.enablePermissionMutation || !capabilities.permissionMutation)
     ) {
       return false;
     }
@@ -142,10 +154,28 @@ export function effectiveSupportedTools(config: ServerConfig): string[] {
     ) {
       return false;
     }
-    if (tool === "item_archive" && !capabilities.itemArchive) {
+    if (
+      tool === "item_archive" &&
+      (!config.enableDestructiveActions || !capabilities.itemArchive)
+    ) {
       return false;
     }
-    if (tool === "item_delete" && !capabilities.itemDelete) {
+    if (
+      tool === "item_delete" &&
+      (!config.enableDestructiveActions || !capabilities.itemDelete)
+    ) {
+      return false;
+    }
+    if (
+      (tool === "op_script_list" ||
+        tool === "op_script_reload_allowlists" ||
+        tool === "op_script_run" ||
+        tool === "op_session_reset") &&
+      !config.enableScriptRunner
+    ) {
+      return false;
+    }
+    if (tool === "op_unrestricted_run" && !config.enableUnrestrictedRunner) {
       return false;
     }
     return true;
