@@ -101,7 +101,7 @@ function parseSecretReference(reference: string): {
   }
 
   const attribute = url.searchParams.get("attribute") ?? url.searchParams.get("attr") ?? "value";
-  if (!["value", "id", "type", "purpose", "otp"].includes(attribute)) {
+  if (!["value", "title", "id", "type", "purpose", "otp"].includes(attribute)) {
     throw new Error(`Unsupported Connect secret reference attribute: ${attribute}`);
   }
 
@@ -186,6 +186,8 @@ function fieldAttribute(field: ConnectItemField, attribute: string): string {
       return field.value ?? field.otp ?? "";
     case "id":
       return field.id ?? "";
+    case "title":
+      return field.label ?? "";
     case "type":
       return fieldTypeForPurpose(field) ?? "";
     case "purpose":
