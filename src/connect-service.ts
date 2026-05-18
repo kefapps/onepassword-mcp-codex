@@ -43,7 +43,7 @@ export interface ConnectClient {
   getItem(vaultId: string, itemQuery: string): Promise<unknown>;
   createItem(vaultId: string, item: unknown): Promise<unknown>;
   updateItem(vaultId: string, item: unknown): Promise<unknown>;
-  deleteItemById(vaultId: string, itemId: string): Promise<void>;
+  deleteItem(vaultId: string, itemQuery: string): Promise<void>;
 }
 
 type ConnectClientFactory = (config: ServerConfig) => Promise<ConnectClient>;
@@ -403,7 +403,7 @@ export class ConnectOnePasswordService implements OnePasswordService {
 
   public async itemDelete(vaultId: string, itemId: string): Promise<void> {
     return this.withClient("item_delete", async (client) => {
-      await client.deleteItemById(vaultId, itemId);
+      await client.deleteItem(vaultId, itemId);
     });
   }
 
