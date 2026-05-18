@@ -245,6 +245,10 @@ test("ConnectOnePasswordService resolves op references without the Desktop SDK",
     "token",
   );
   assert.equal(
+    await service.secretResolve("op://Engineering/Database/Credentials/api-token?attribute=title"),
+    "api-token",
+  );
+  assert.equal(
     await service.secretResolve("op://Engineering/Database/Credentials/api-token?attribute=type"),
     "CONCEALED",
   );
