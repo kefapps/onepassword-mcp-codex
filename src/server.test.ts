@@ -1315,6 +1315,7 @@ test("unrestricted script runner ignores allowlists and gates free commands once
       enabled: boolean;
       mode: string;
       configuredRoot: string;
+      requireSessionApproval: boolean;
       approvedRootCount: number;
       rememberTtlMs: number;
     };
@@ -1326,6 +1327,7 @@ test("unrestricted script runner ignores allowlists and gates free commands once
     statusPayload.unrestrictedRunner.configuredRoot,
     "unrestricted-script-runner-session",
   );
+  assert.equal(statusPayload.unrestrictedRunner.requireSessionApproval, true);
   assert.equal(statusPayload.unrestrictedRunner.approvedRootCount, 1);
   assert.equal(statusPayload.unrestrictedRunner.rememberTtlMs, 24 * 60 * 60_000);
 
@@ -1418,6 +1420,19 @@ test("unrestricted script runner skips approval when session approval is disable
   assert.equal(payload.stdout, "ran without session approval\n");
   assert.equal(payload.outputReturned, true);
   assert.equal(auditLogger.events.at(-1)?.action, "op_script_run");
+
+  const status = await client.callTool({
+    name: "op_session_status",
+    arguments: {},
+  });
+  const statusPayload = status.structuredContent as {
+    unrestrictedRunner: {
+      requireSessionApproval: boolean;
+      approvalServerAvailable: boolean;
+    };
+  };
+  assert.equal(statusPayload.unrestrictedRunner.requireSessionApproval, false);
+  assert.equal(statusPayload.unrestrictedRunner.approvalServerAvailable, false);
   await client.close();
 });
 

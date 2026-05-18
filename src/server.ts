@@ -363,7 +363,7 @@ function sessionUnrestrictedRunnerStatus(
     enabled: true,
     configuredRoot: UNRESTRICTED_SCRIPT_RUNNER_SCOPE,
     configuredRootCount: 1,
-    requireSessionApproval: true,
+    requireSessionApproval: config.unrestrictedRunnerRequireSessionApproval,
     approvalServerAvailable: approvalManager.approvalServerAvailable,
     approvedRootCount: approvalManager.approvedRootCount,
     approvalTtlMs: config.unrestrictedRunnerApprovalTtlMs,

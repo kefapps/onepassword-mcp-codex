@@ -412,6 +412,42 @@ test("parseConfig accepts explicit unrestricted runner approval bypass acknowled
   assert.equal(config.unrestrictedRunnerRequireSessionApproval, false);
 });
 
+test("parseConfig requires acknowledgement before disabling unrestricted script runner approval", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--account",
+          "TestAccount",
+          "--enable-unrestricted-script-runner=true",
+          "--op-cli-path=/usr/local/bin/op",
+          "--op-cli-auth-mode=desktop",
+          "--unrestricted-runner-require-session-approval=false",
+        ],
+        "0.1.0",
+      ),
+    /acknowledge-unrestricted-runner/,
+  );
+});
+
+test("parseConfig accepts acknowledged unrestricted script runner approval bypass", () => {
+  const config = parseConfig(
+    [
+      "--account",
+      "TestAccount",
+      "--enable-unrestricted-script-runner=true",
+      "--op-cli-path=/usr/local/bin/op",
+      "--op-cli-auth-mode=desktop",
+      "--unrestricted-runner-require-session-approval=false",
+      `--acknowledge-unrestricted-runner=${UNRESTRICTED_RUNNER_ACK}`,
+    ],
+    "0.1.0",
+  );
+
+  assert.equal(config.enableUnrestrictedScriptRunner, true);
+  assert.equal(config.unrestrictedRunnerRequireSessionApproval, false);
+});
+
 test("parseConfig requires a bearer token for HTTP transport by default", () => {
   withCleanAuthEnv(() => {
     assert.throws(
