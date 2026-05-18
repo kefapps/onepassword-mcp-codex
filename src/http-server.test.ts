@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -7,6 +8,7 @@ import type { ServerConfig } from "./config.js";
 import { startOnePasswordHttpServer } from "./http-server.js";
 import { DefaultOpScriptRunner } from "./op-runner.js";
 import type { OnePasswordService } from "./service.js";
+import { UnrestrictedApprovalManager } from "./unrestricted-runner.js";
 
 const HTTP_TOKEN = "local-token-123456";
 
@@ -301,6 +303,55 @@ test("HTTP MCP endpoint accepts bearer-authenticated clients", async () => {
 
     assert(tools.tools.some((tool) => tool.name === "sdk_capabilities"));
     assert(!tools.tools.some((tool) => tool.name === "op_script_run"));
+  } finally {
+    await client.close();
+    await handle.close();
+  }
+});
+
+test("HTTP default unrestricted runner reuses the supplied approval manager", async () => {
+  const workspaceRoot = tmpdir();
+  const config = createConfig({
+    enableUnrestrictedRunner: true,
+    unrestrictedRunnerRoots: [workspaceRoot],
+  });
+  const approvalManager = new UnrestrictedApprovalManager(60_000);
+  approvalManager.setApprovalBaseUrl("http://127.0.0.1:19000");
+  const handle = await startOnePasswordHttpServer(
+    config,
+    {} as OnePasswordService,
+    new MemoryAuditLogger(),
+    new DefaultOpScriptRunner(config),
+    undefined,
+    approvalManager,
+  );
+  const transport = new StreamableHTTPClientTransport(new URL(handle.url), {
+    requestInit: {
+      headers: {
+        authorization: `Bearer ${HTTP_TOKEN}`,
+      },
+    },
+  });
+  const client = new Client({ name: "test-client", version: "1.0.0" });
+
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: "op_unrestricted_run",
+      arguments: {
+        workspaceRoot,
+        command: "printf ok",
+        reason: "Need broad command execution in this worktree",
+      },
+    });
+    const payload = result.structuredContent as {
+      authorizationRequired: boolean;
+      approvalUrl: string;
+    };
+
+    assert.notEqual(result.isError, true);
+    assert.equal(payload.authorizationRequired, true);
+    assert.match(payload.approvalUrl, /^http:\/\/127\.0\.0\.1:19000\/approve/);
   } finally {
     await client.close();
     await handle.close();

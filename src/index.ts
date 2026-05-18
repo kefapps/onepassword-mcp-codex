@@ -15,7 +15,7 @@ import { createOnePasswordMcpServer } from "./server.js";
 import { SdkOnePasswordService } from "./service.js";
 import {
   DefaultUnrestrictedRunner,
-  UnrestrictedApprovalManager,
+  createUnrestrictedApprovalManager,
   startUnrestrictedApprovalServer,
 } from "./unrestricted-runner.js";
 
@@ -39,14 +39,7 @@ async function main(): Promise<void> {
     config.authMode === "connect"
       ? new ConnectOnePasswordService(config, undefined, auditLogger)
       : new SdkOnePasswordService(config, undefined, auditLogger);
-  const unrestrictedApprovalManager = new UnrestrictedApprovalManager(
-    config.unrestrictedRunnerApprovalTtlMs,
-    {
-      storePath: config.approvalRememberStorePath,
-      keyPath: config.approvalRememberKeyPath,
-      rememberTtlMs: config.approvalRememberTtlMs,
-    },
-  );
+  const unrestrictedApprovalManager = createUnrestrictedApprovalManager(config);
   const scriptRunner = new DefaultOpScriptRunner(config);
   const unrestrictedApprovalServer = await startUnrestrictedApprovalServer(
     config,

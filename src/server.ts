@@ -61,6 +61,7 @@ import type { OnePasswordService } from "./service.js";
 import {
   DefaultUnrestrictedRunner,
   UnrestrictedApprovalManager,
+  createUnrestrictedApprovalManager,
   type UnrestrictedRunner,
   type UnrestrictedRunnerStatus,
 } from "./unrestricted-runner.js";
@@ -903,23 +904,14 @@ export function createOnePasswordMcpServer(
   service: OnePasswordService,
   auditLogger: AuditLogger,
   scriptRunner: OpScriptRunner = new DefaultOpScriptRunner(config),
-  unrestrictedRunner: UnrestrictedRunner = new DefaultUnrestrictedRunner(
-    config,
-    new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs, {
-      storePath: config.approvalRememberStorePath,
-      keyPath: config.approvalRememberKeyPath,
-      rememberTtlMs: config.approvalRememberTtlMs,
-    }),
-  ),
-  approvalManager: UnrestrictedApprovalManager = new UnrestrictedApprovalManager(
-    config.unrestrictedRunnerApprovalTtlMs,
-    {
-      storePath: config.approvalRememberStorePath,
-      keyPath: config.approvalRememberKeyPath,
-      rememberTtlMs: config.approvalRememberTtlMs,
-    },
-  ),
+  providedUnrestrictedRunner?: UnrestrictedRunner,
+  providedApprovalManager?: UnrestrictedApprovalManager,
 ): McpServer {
+  const approvalManager =
+    providedApprovalManager ?? createUnrestrictedApprovalManager(config);
+  const unrestrictedRunner =
+    providedUnrestrictedRunner ??
+    new DefaultUnrestrictedRunner(config, approvalManager);
   const capabilities = backendCapabilities(config);
   const supportedTools = effectiveSupportedTools(config);
   const server = new McpServer({

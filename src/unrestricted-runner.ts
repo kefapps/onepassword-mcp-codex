@@ -319,6 +319,16 @@ export class UnrestrictedApprovalManager {
   }
 }
 
+export function createUnrestrictedApprovalManager(
+  config: ServerConfig,
+): UnrestrictedApprovalManager {
+  return new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs, {
+    storePath: config.approvalRememberStorePath,
+    keyPath: config.approvalRememberKeyPath,
+    rememberTtlMs: config.approvalRememberTtlMs,
+  });
+}
+
 export interface UnrestrictedApprovalServerHandle {
   server: Server;
   url: string;
