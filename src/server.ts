@@ -1148,7 +1148,10 @@ export function createOnePasswordMcpServer(
               );
             }
 
-            if (!approvalManager.isApproved(UNRESTRICTED_SCRIPT_RUNNER_SCOPE)) {
+            if (
+              config.unrestrictedRunnerRequireSessionApproval &&
+              !approvalManager.isApproved(UNRESTRICTED_SCRIPT_RUNNER_SCOPE)
+            ) {
               const authorization = approvalManager.createAuthorizationRequest(
                 workspaceRoot,
                 UNRESTRICTED_SCRIPT_RUNNER_SCOPE,

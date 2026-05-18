@@ -448,6 +448,7 @@ async function createClientAndServer(
     scriptRunner?: OpScriptRunner;
     unrestrictedRunner?: UnrestrictedRunner;
     approvalManager?: UnrestrictedApprovalManager;
+    unrestrictedRunnerRequireSessionApproval?: boolean;
   } = {},
 ) {
   const config: ServerConfig = {
@@ -469,7 +470,8 @@ async function createClientAndServer(
     scriptRunnerAllowlistManifestPaths: [],
     enableUnrestrictedRunner: options.enableUnrestrictedRunner ?? false,
     unrestrictedRunnerRoots: ["/workspace"],
-    unrestrictedRunnerRequireSessionApproval: true,
+    unrestrictedRunnerRequireSessionApproval:
+      options.unrestrictedRunnerRequireSessionApproval ?? true,
     unrestrictedRunnerApprovalHost: "127.0.0.1",
     unrestrictedRunnerApprovalPort: 0,
     unrestrictedRunnerApprovalTtlMs: 12 * 60 * 60_000,
@@ -1384,6 +1386,39 @@ test("unrestricted script runner ignores allowlists and gates free commands once
   assert.equal(scriptRunner.lastRunOptions?.extraEnv?.SUPABASE_DB_PASSWORD, "supabase-db-password-secret");
   assert(!auditPayload.includes("node scripts/deploy.mjs"));
   assert(!auditPayload.includes("supabase-db-password-secret"));
+});
+
+test("unrestricted script runner skips approval when session approval is disabled", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  scriptRunner.nextStdout = "ran without session approval\n";
+  const { client, auditLogger } = await createClientAndServer(false, {
+    enableUnrestrictedScriptRunner: true,
+    unrestrictedRunnerRequireSessionApproval: false,
+    scriptRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      command: "node scripts/deploy.mjs",
+      reason: "Need free command execution without session approval",
+      returnOutput: true,
+      acknowledgePlaintext: SECRET_REVEAL_ACK,
+    },
+  });
+  const payload = result.structuredContent as {
+    mode: string;
+    stdout: string;
+    outputReturned: boolean;
+  };
+
+  assert.equal(result.isError, false);
+  assert.equal(payload.mode, "unrestricted");
+  assert.equal(payload.stdout, "ran without session approval\n");
+  assert.equal(payload.outputReturned, true);
+  assert.equal(auditLogger.events.at(-1)?.action, "op_script_run");
+  await client.close();
 });
 
 test("script runner injects 1Password secrets without returning plaintext", async () => {
