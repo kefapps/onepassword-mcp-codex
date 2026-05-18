@@ -134,7 +134,7 @@ class FakeConnectClient implements ConnectClient {
     };
   }
 
-  public async deleteItemById(vaultId: string, itemId: string): Promise<void> {
+  public async deleteItem(vaultId: string, itemId: string): Promise<void> {
     this.deletedItem = { vaultId, itemId };
   }
 }
@@ -207,6 +207,23 @@ test("ConnectOnePasswordService maps vault and item CRUD through the Connect cli
 
   await service.itemDelete("vault-1", "item-1");
   assert.deepEqual(fakeClient.deletedItem, { vaultId: "vault-1", itemId: "item-1" });
+});
+
+test("ConnectOnePasswordService deletes items with the public Connect SDK delete API", async () => {
+  let deletedItem: { vaultId: string; itemId: string } | undefined;
+  const service = new ConnectOnePasswordService(
+    createConfig(),
+    async () =>
+      ({
+        deleteItem: async (vaultId: string, itemId: string) => {
+          deletedItem = { vaultId, itemId };
+        },
+      }) as unknown as ConnectClient,
+  );
+
+  await service.itemDelete("vault-1", "item-1");
+
+  assert.deepEqual(deletedItem, { vaultId: "vault-1", itemId: "item-1" });
 });
 
 test("ConnectOnePasswordService resolves op references without the Desktop SDK", async () => {
