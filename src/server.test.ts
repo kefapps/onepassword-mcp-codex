@@ -532,8 +532,15 @@ function readTextResource(
 test("registers expected tools", async () => {
   const { client } = await createClientAndServer();
   const tools = await client.listTools();
+  const capabilities = await client.callTool({
+    name: "sdk_capabilities",
+    arguments: {},
+  });
   const passwordReadTool = tools.tools.find((tool) => tool.name === "password_read");
   const secretRevealTool = tools.tools.find((tool) => tool.name === "secret_reveal");
+  const capabilityPayload = capabilities.structuredContent as {
+    effectiveSupportedTools: string[];
+  };
   const passwordReadProperties =
     (passwordReadTool?.inputSchema as { properties?: Record<string, unknown> })
       .properties ?? {};
@@ -561,6 +568,10 @@ test("registers expected tools", async () => {
   assert(!tools.tools.some((tool) => tool.name === "op_script_run"));
   assert(!tools.tools.some((tool) => tool.name === "op_script_reload_allowlists"));
   assert(!tools.tools.some((tool) => tool.name === "op_unrestricted_run"));
+  assert.deepEqual(
+    [...capabilityPayload.effectiveSupportedTools].sort(),
+    tools.tools.map((tool) => tool.name).sort(),
+  );
 });
 
 test("diagnostics audit records MCP requests without raw arguments", async () => {
@@ -642,6 +653,15 @@ test("connect mode registers only Connect-supported backend tools", async () => 
   assert(!names.has("environment_get_variables"));
   assert(!names.has("environment_get_variable"));
   assert(!names.has("environment_reveal_variable"));
+
+  const capabilities = await client.callTool({
+    name: "sdk_capabilities",
+    arguments: {},
+  });
+  const capabilityPayload = capabilities.structuredContent as {
+    effectiveSupportedTools: string[];
+  };
+  assert.deepEqual([...capabilityPayload.effectiveSupportedTools].sort(), [...names].sort());
 });
 
 test("registers script runner tools when enabled", async () => {
