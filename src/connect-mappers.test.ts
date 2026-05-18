@@ -152,6 +152,28 @@ test("maps Connect item overviews and full items to SDK-shaped items", () => {
   });
 });
 
+test("maps Connect Document items to SDK-shaped Document items", () => {
+  const connectItem = {
+    id: "item-document",
+    title: "Contract.pdf",
+    category: "DOCUMENT",
+    vault: { id: "vault-1" },
+    version: 1,
+    createdAt: new Date("2026-05-01T10:00:00.000Z"),
+    updatedAt: new Date("2026-05-02T10:00:00.000Z"),
+  };
+
+  assert.equal(
+    mapConnectItemToItemOverview(connectItem, "vault-1").category,
+    ItemCategory.Document,
+  );
+  assert.equal(
+    mapConnectFullItemToItem({ ...connectItem, fields: [], sections: [] }, "vault-1")
+      .category,
+    ItemCategory.Document,
+  );
+});
+
 test("maps SDK item create and update payloads to Connect FullItem payloads", () => {
   const createParams: ItemCreateParams = {
     vaultId: "vault-1",
@@ -245,4 +267,35 @@ test("maps SDK item create and update payloads to Connect FullItem payloads", ()
     version: 4,
     urls: [],
   });
+});
+
+test("rejects unsupported SDK item categories on Connect write payloads", () => {
+  assert.throws(
+    () =>
+      mapSdkItemCreateParamsToConnectItem({
+        vaultId: "vault-1",
+        category: ItemCategory.Unsupported,
+        title: "Unsupported item",
+      }),
+    /Unsupported 1Password item category/,
+  );
+
+  assert.throws(
+    () =>
+      mapSdkItemToConnectItem({
+        id: "item-unsupported",
+        title: "Unsupported item",
+        category: ItemCategory.Unsupported,
+        vaultId: "vault-1",
+        fields: [],
+        sections: [],
+        tags: [],
+        websites: [],
+        version: 1,
+        files: [],
+        createdAt: new Date("2026-05-01T10:00:00.000Z"),
+        updatedAt: new Date("2026-05-02T10:00:00.000Z"),
+      }),
+    /Unsupported 1Password item category/,
+  );
 });
