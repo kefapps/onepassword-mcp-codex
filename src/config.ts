@@ -239,7 +239,13 @@ function parseCommaList(value: string | undefined): string[] {
 }
 
 function isLocalHttpHost(host: string): boolean {
-  return host === "127.0.0.1" || host === "::1" || host === "localhost";
+  const normalizedHost =
+    host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return (
+    normalizedHost === "127.0.0.1" ||
+    normalizedHost === "::1" ||
+    normalizedHost === "localhost"
+  );
 }
 
 function parseConnectHost(value: string | undefined): string {

@@ -114,6 +114,20 @@ test("parseConfig accepts local Connect auth mode", () => {
   });
 });
 
+test("parseConfig accepts IPv6 loopback Connect hosts", () => {
+  const config = parseConfig(
+    [
+      "--auth-mode=connect",
+      "--connect-token=connect-token",
+      "--connect-host=http://[::1]:8080",
+    ],
+    "0.1.0",
+  );
+
+  assert.equal(config.authMode, "connect");
+  assert.equal(config.connectHost, "http://[::1]:8080");
+});
+
 test("parseConfig rejects Connect hosts outside localhost", () => {
   withCleanAuthEnv(() => {
     assert.throws(
