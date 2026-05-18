@@ -1,5 +1,17 @@
+import type { ServerConfig } from "./config.js";
+
+export interface BackendCapabilities {
+  vaultMutation: boolean;
+  vaultDestructive: boolean;
+  permissionRead: boolean;
+  permissionMutation: boolean;
+  environments: boolean;
+  itemArchive: boolean;
+  itemDelete: boolean;
+}
+
 export const SDK_CAPABILITIES = {
-  supportedAuthModes: ["desktop", "service-account"],
+  supportedAuthModes: ["desktop", "service-account", "connect"],
   supportedTransports: ["stdio", "http"],
   supportedTools: [
     "sdk_capabilities",
@@ -63,10 +75,79 @@ export const SDK_CAPABILITIES = {
     "Password generator tools return new plaintext secrets only with a reason and generated-secret acknowledgement.",
     "Write, destructive, and permission mutation tools are separately gated behind startup flags; destructive and permission mutation calls require per-call acknowledgement.",
     "The allowlisted script runner is disabled unless the server starts with --enable-script-runner=true.",
-    "The script runner only uses startup-configured --script-runner-allowlist paths and --script-runner-allowlist-manifest trust anchors; their file contents can be reloaded on demand and stdout/stderr is withheld by default. Sensitive output requested without acknowledgement is withheld without rejecting the run.",
+    "The unrestricted script runner is disabled unless the server starts with --enable-unrestricted-script-runner=true. In that mode op_script_run ignores startup allowlists, accepts free-form shell commands after one local approval per MCP process, and still supports envSecretRefs injection.",
+    "The script runner only uses startup-configured --script-runner-allowlist paths and --script-runner-allowlist-manifest trust anchors; their file contents can be reloaded on demand and stdout/stderr is withheld by default. Sensitive output requested without acknowledgement is rejected before the command is executed.",
     "The unrestricted runner is disabled unless the server starts with --enable-unrestricted-runner=true and configured roots. It accepts free-form shell commands only after explicit local session approval; the configured path is an approval scope, not an operating-system sandbox.",
     "HTTP transport is optional, local/single-user by design, validates browser Origin headers, bounds session lifetime/count, and requires OP_MCP_HTTP_BEARER_TOKEN unless explicitly disabled on localhost.",
     "Vault permission mutation is available only for group-based access because that is the surface exposed by the official JS SDK beta.",
     "1Password Environments are read-only at the moment because the official JS SDK beta only exposes variable retrieval.",
   ],
 } as const;
+
+export function backendCapabilities(config: ServerConfig): BackendCapabilities {
+  if (config.authMode === "connect") {
+    return {
+      vaultMutation: false,
+      vaultDestructive: false,
+      permissionRead: false,
+      permissionMutation: false,
+      environments: false,
+      itemArchive: false,
+      itemDelete: true,
+    };
+  }
+
+  return {
+    vaultMutation: true,
+    vaultDestructive: true,
+    permissionRead: true,
+    permissionMutation: true,
+    environments: true,
+    itemArchive: true,
+    itemDelete: true,
+  };
+}
+
+export function effectiveSupportedTools(config: ServerConfig): string[] {
+  const capabilities = backendCapabilities(config);
+  return SDK_CAPABILITIES.supportedTools.filter((tool) => {
+    if (
+      (tool === "vault_create" || tool === "vault_update") &&
+      !capabilities.vaultMutation
+    ) {
+      return false;
+    }
+    if (tool === "vault_delete" && !capabilities.vaultDestructive) {
+      return false;
+    }
+    if (
+      (tool === "group_get" || tool === "vault_permissions_get") &&
+      !capabilities.permissionRead
+    ) {
+      return false;
+    }
+    if (
+      (tool === "vault_permissions_grant_group" ||
+        tool === "vault_permissions_update_group" ||
+        tool === "vault_permissions_revoke_group") &&
+      !capabilities.permissionMutation
+    ) {
+      return false;
+    }
+    if (
+      (tool === "environment_get_variables" ||
+        tool === "environment_get_variable" ||
+        tool === "environment_reveal_variable") &&
+      !capabilities.environments
+    ) {
+      return false;
+    }
+    if (tool === "item_archive" && !capabilities.itemArchive) {
+      return false;
+    }
+    if (tool === "item_delete" && !capabilities.itemDelete) {
+      return false;
+    }
+    return true;
+  });
+}

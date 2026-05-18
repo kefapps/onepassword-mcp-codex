@@ -18,7 +18,12 @@ import {
   DesktopAuth,
   createClient,
 } from "@1password/sdk";
+import type { AuditLogger } from "./audit.js";
 import type { ServerConfig } from "./config.js";
+import {
+  recordDiagnosticAudit,
+  type RuntimeDiagnostics,
+} from "./diagnostics.js";
 
 type ClientFactory = (config: ServerConfig) => Promise<Client>;
 
@@ -58,11 +63,38 @@ function createSdkClient(config: ServerConfig): Promise<Client> {
 
 export class SdkOnePasswordService implements OnePasswordService {
   private clientPromise?: Promise<Client>;
+  private sdkClientCreated = false;
+  private lastSdkAuthAttemptAt?: string;
+  private lastSdkAuthOutcome?: "success" | "error";
+  private lastSdkOperation?: string;
 
   public constructor(
     private readonly config: ServerConfig,
     private readonly clientFactory: ClientFactory = createSdkClient,
+    private readonly auditLogger?: AuditLogger,
   ) {}
+
+  public runtimeDiagnostics(): RuntimeDiagnostics {
+    return {
+      backend: "sdk",
+      sdkClientCreated: this.sdkClientCreated,
+      lastSdkAuthAttemptAt: this.lastSdkAuthAttemptAt,
+      lastSdkAuthOutcome: this.lastSdkAuthOutcome,
+      lastSdkOperation: this.lastSdkOperation,
+    };
+  }
+
+  private recordDiagnostic(
+    action: string,
+    outcome: "success" | "error",
+    metadata: Record<string, unknown>,
+    error?: unknown,
+  ): void {
+    if (!this.auditLogger) {
+      return;
+    }
+    recordDiagnosticAudit(this.config, this.auditLogger, action, outcome, metadata, error);
+  }
 
   private shouldRefreshClient(error: unknown): boolean {
     if (!(error instanceof Error)) {
@@ -74,65 +106,119 @@ export class SdkOnePasswordService implements OnePasswordService {
 
   private resetClient(): void {
     this.clientPromise = undefined;
+    this.sdkClientCreated = false;
   }
 
-  private getClient(): Promise<Client> {
+  private getClient(triggerOperation: string): Promise<Client> {
     if (!this.clientPromise) {
-      this.clientPromise = this.clientFactory(this.config).catch((error) => {
-        this.resetClient();
-        throw error;
+      this.lastSdkAuthAttemptAt = new Date().toISOString();
+      this.lastSdkOperation = triggerOperation;
+      this.recordDiagnostic("op_sdk_client_create_start", "success", {
+        triggerOperation,
+        authMode: this.config.authMode,
+        accountConfigured: Boolean(this.config.account),
+        serviceAccountTokenConfigured: Boolean(this.config.serviceAccountToken),
       });
+      this.clientPromise = this.clientFactory(this.config)
+        .then((client) => {
+          this.sdkClientCreated = true;
+          this.lastSdkAuthOutcome = "success";
+          this.recordDiagnostic("op_sdk_client_create", "success", {
+            triggerOperation,
+            authMode: this.config.authMode,
+          });
+          return client;
+        })
+        .catch((error) => {
+          this.lastSdkAuthOutcome = "error";
+          this.recordDiagnostic("op_sdk_client_create", "error", {
+            triggerOperation,
+            authMode: this.config.authMode,
+          }, error);
+          this.resetClient();
+          throw error;
+        });
     }
 
     return this.clientPromise;
   }
 
-  private async withClient<T>(operation: (client: Client) => Promise<T>): Promise<T> {
+  private async withClient<T>(
+    operationName: string,
+    operation: (client: Client) => Promise<T>,
+  ): Promise<T> {
+    const startedAt = Date.now();
+    this.lastSdkOperation = operationName;
     try {
-      return await operation(await this.getClient());
+      const result = await operation(await this.getClient(operationName));
+      this.recordDiagnostic("op_sdk_operation", "success", {
+        operation: operationName,
+        durationMs: Date.now() - startedAt,
+        sdkClientCreated: this.sdkClientCreated,
+      });
+      return result;
     } catch (error) {
       if (!this.shouldRefreshClient(error)) {
+        this.recordDiagnostic("op_sdk_operation", "error", {
+          operation: operationName,
+          durationMs: Date.now() - startedAt,
+          sdkClientCreated: this.sdkClientCreated,
+          retried: false,
+        }, error);
         throw error;
       }
 
       this.resetClient();
-      return operation(await this.getClient());
+      const result = await operation(await this.getClient(operationName));
+      this.recordDiagnostic("op_sdk_operation", "success", {
+        operation: operationName,
+        durationMs: Date.now() - startedAt,
+        sdkClientCreated: this.sdkClientCreated,
+        retried: true,
+      });
+      return result;
     }
   }
 
   public async vaultList(params?: VaultListParams): Promise<VaultOverview[]> {
-    return this.withClient((client) => client.vaults.list(params));
+    return this.withClient("vault_list", (client) => client.vaults.list(params));
   }
 
   public async vaultGetOverview(vaultId: string): Promise<VaultOverview> {
-    return this.withClient((client) => client.vaults.getOverview(vaultId));
+    return this.withClient("vault_get_overview", (client) =>
+      client.vaults.getOverview(vaultId),
+    );
   }
 
   public async vaultGet(vaultId: string, params: VaultGetParams): Promise<Vault> {
-    return this.withClient((client) => client.vaults.get(vaultId, params));
+    return this.withClient("vault_get", (client) =>
+      client.vaults.get(vaultId, params),
+    );
   }
 
   public async vaultCreate(params: VaultCreateParams): Promise<Vault> {
-    return this.withClient((client) => client.vaults.create(params));
+    return this.withClient("vault_create", (client) => client.vaults.create(params));
   }
 
   public async vaultUpdate(vaultId: string, params: VaultUpdateParams): Promise<Vault> {
-    return this.withClient((client) => client.vaults.update(vaultId, params));
+    return this.withClient("vault_update", (client) =>
+      client.vaults.update(vaultId, params),
+    );
   }
 
   public async vaultDelete(vaultId: string): Promise<void> {
-    await this.withClient((client) => client.vaults.delete(vaultId));
+    await this.withClient("vault_delete", (client) => client.vaults.delete(vaultId));
   }
 
   public async groupGet(groupId: string, params: GroupGetParams): Promise<Group> {
-    return this.withClient((client) => client.groups.get(groupId, params));
+    return this.withClient("group_get", (client) => client.groups.get(groupId, params));
   }
 
   public async vaultGrantGroupPermissions(
     vaultId: string,
     permissions: GroupAccess[],
   ): Promise<void> {
-    await this.withClient((client) =>
+    await this.withClient("vault_grant_group_permissions", (client) =>
       client.vaults.grantGroupPermissions(vaultId, permissions),
     );
   }
@@ -140,14 +226,16 @@ export class SdkOnePasswordService implements OnePasswordService {
   public async vaultUpdateGroupPermissions(
     permissions: GroupVaultAccess[],
   ): Promise<void> {
-    await this.withClient((client) => client.vaults.updateGroupPermissions(permissions));
+    await this.withClient("vault_update_group_permissions", (client) =>
+      client.vaults.updateGroupPermissions(permissions),
+    );
   }
 
   public async vaultRevokeGroupPermissions(
     vaultId: string,
     groupId: string,
   ): Promise<void> {
-    await this.withClient((client) =>
+    await this.withClient("vault_revoke_group_permissions", (client) =>
       client.vaults.revokeGroupPermissions(vaultId, groupId),
     );
   }
@@ -156,36 +244,46 @@ export class SdkOnePasswordService implements OnePasswordService {
     vaultId: string,
     ...filters: ItemListFilter[]
   ): Promise<ItemOverview[]> {
-    return this.withClient((client) => client.items.list(vaultId, ...filters));
+    return this.withClient("item_list", (client) =>
+      client.items.list(vaultId, ...filters),
+    );
   }
 
   public async itemGet(vaultId: string, itemId: string): Promise<Item> {
-    return this.withClient((client) => client.items.get(vaultId, itemId));
+    return this.withClient("item_get", (client) => client.items.get(vaultId, itemId));
   }
 
   public async itemCreate(params: ItemCreateParams): Promise<Item> {
-    return this.withClient((client) => client.items.create(params));
+    return this.withClient("item_create", (client) => client.items.create(params));
   }
 
   public async itemPut(item: Item): Promise<Item> {
-    return this.withClient((client) => client.items.put(item));
+    return this.withClient("item_put", (client) => client.items.put(item));
   }
 
   public async itemDelete(vaultId: string, itemId: string): Promise<void> {
-    await this.withClient((client) => client.items.delete(vaultId, itemId));
+    await this.withClient("item_delete", (client) =>
+      client.items.delete(vaultId, itemId),
+    );
   }
 
   public async itemArchive(vaultId: string, itemId: string): Promise<void> {
-    await this.withClient((client) => client.items.archive(vaultId, itemId));
+    await this.withClient("item_archive", (client) =>
+      client.items.archive(vaultId, itemId),
+    );
   }
 
   public async environmentGetVariables(
     environmentId: string,
   ): Promise<GetVariablesResponse> {
-    return this.withClient((client) => client.environments.getVariables(environmentId));
+    return this.withClient("environment_get_variables", (client) =>
+      client.environments.getVariables(environmentId),
+    );
   }
 
   public async secretResolve(reference: string): Promise<string> {
-    return this.withClient((client) => client.secrets.resolve(reference));
+    return this.withClient("secret_resolve", (client) =>
+      client.secrets.resolve(reference),
+    );
   }
 }

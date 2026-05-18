@@ -1,0 +1,33 @@
+name: onepassword-connect-local
+
+x-onepassword-connect-common: &onepassword-connect-common
+  restart: unless-stopped
+  volumes:
+    - type: bind
+      source: ./.local/onepassword-connect/1password-credentials.json
+      target: /home/opuser/.op/1password-credentials.json
+      read_only: true
+    - type: volume
+      source: onepassword-connect-data
+      target: /home/opuser/.op/data
+  environment:
+    OP_LOG_LEVEL: info
+  networks:
+    - onepassword-connect
+
+services:
+  op-connect-api:
+    <<: *onepassword-connect-common
+    image: 1password/connect-api:latest
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  op-connect-sync:
+    <<: *onepassword-connect-common
+    image: 1password/connect-sync:latest
+
+volumes:
+  onepassword-connect-data:
+
+networks:
+  onepassword-connect:

@@ -20,6 +20,9 @@
   "files": [
     "dist",
     "README.md",
+    "docs/connect-local-poc.md",
+    "docker-compose.connect.yml",
+    "docker-compose.connect.example.yml",
     "launchd/local.mcp-1password.plist.example"
   ],
   "bin": {
@@ -40,6 +43,7 @@
     "node": ">=20.10.0"
   },
   "dependencies": {
+    "@1password/connect": "1.4.2",
     "@1password/sdk": "0.4.1-beta.1",
     "@modelcontextprotocol/sdk": "1.29.0",
     "zod": "3.25.76"

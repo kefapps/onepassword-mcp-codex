@@ -1,8 +1,15 @@
-import { randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { realpathSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { realpath } from "node:fs/promises";
-import { isAbsolute, relative, sep } from "node:path";
+import { dirname, isAbsolute, relative, sep } from "node:path";
 import type { AuditLogger } from "./audit.js";
 import type { ServerConfig } from "./config.js";
 import { UNRESTRICTED_RUNNER_ACK } from "./constants.js";
@@ -15,6 +22,8 @@ import {
 
 const PENDING_APPROVAL_TTL_MS = 10 * 60_000;
 const APPROVAL_FORM_MAX_BYTES = 16 * 1024;
+const REMEMBER_APPROVAL_TTL_MS = 24 * 60 * 60_000;
+const APPROVAL_STORE_ALGORITHM = "aes-256-gcm";
 
 export interface UnrestrictedRunnerStatus {
   enabled: boolean;
@@ -63,6 +72,17 @@ interface ApprovalGrant {
   expiresAtMs: number;
 }
 
+interface ApprovalPersistenceConfig {
+  storePath: string;
+  keyPath: string;
+  rememberTtlMs?: number;
+}
+
+interface PersistentApprovalGrant {
+  configuredRoot: string;
+  expiresAtMs: number;
+}
+
 interface ResolvedWorkspace {
   workspaceRoot: string;
   configuredRoot: string;
@@ -71,14 +91,21 @@ interface ResolvedWorkspace {
 export interface UnrestrictedApprovalResult {
   configuredRoot: string;
   expiresAt: string;
+  remembered: boolean;
 }
 
 export class UnrestrictedApprovalManager {
   private approvalBaseUrl?: string;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly grants = new Map<string, ApprovalGrant>();
+  private readonly persistentGrantScopes = new Set<string>();
 
-  public constructor(private readonly approvalTtlMs: number) {}
+  public constructor(
+    private readonly approvalTtlMs: number,
+    private readonly persistence?: ApprovalPersistenceConfig,
+  ) {
+    this.loadPersistentGrants();
+  }
 
   public setApprovalBaseUrl(url: string): void {
     this.approvalBaseUrl = url.replace(/\/$/, "");
@@ -116,14 +143,16 @@ export class UnrestrictedApprovalManager {
       expiresAtMs,
     });
 
+    const sessionWide = configuredRoot === "unrestricted-script-runner-session";
     return {
       authorizationRequired: true,
       approvalUrl: `${this.approvalBaseUrl}/approve?token=${encodeURIComponent(token)}`,
       workspaceRoot,
       configuredRoot,
       acknowledgement: UNRESTRICTED_RUNNER_ACK,
-      warning:
-        "Approval permits arbitrary local command execution for this configured root in the current MCP process. The path is an approval scope, not an operating-system sandbox.",
+      warning: sessionWide
+        ? "Approval permits arbitrary local op_script_run command execution for this MCP process. This is an approval scope, not an operating-system sandbox."
+        : "Approval permits arbitrary local command execution for this configured root in the current MCP process. The path is an approval scope, not an operating-system sandbox.",
       expiresAt: new Date(expiresAtMs).toISOString(),
     };
   }
@@ -137,6 +166,7 @@ export class UnrestrictedApprovalManager {
     token: string,
     acceptedRisk: boolean,
     acknowledgement: string | undefined,
+    rememberFor24h = false,
   ): UnrestrictedApprovalResult {
     this.pruneExpired();
     const pending = this.pendingApprovals.get(token);
@@ -147,17 +177,28 @@ export class UnrestrictedApprovalManager {
       throw new Error("Approval requires the risk checkbox and exact acknowledgement phrase.");
     }
 
-    const expiresAtMs = Date.now() + this.approvalTtlMs;
+    const remembered = rememberFor24h && Boolean(this.persistence);
+    const expiresAtMs =
+      Date.now() +
+      (rememberFor24h
+        ? (this.persistence?.rememberTtlMs ?? REMEMBER_APPROVAL_TTL_MS)
+        : this.approvalTtlMs);
     this.pendingApprovals.delete(token);
     this.grants.set(pending.configuredRoot, { expiresAtMs });
+    if (remembered) {
+      this.persistentGrantScopes.add(pending.configuredRoot);
+      this.writePersistentGrants();
+    }
     return {
       configuredRoot: pending.configuredRoot,
       expiresAt: new Date(expiresAtMs).toISOString(),
+      remembered,
     };
   }
 
   private pruneExpired(): void {
     const now = Date.now();
+    let persistentGrantsChanged = false;
     for (const [token, pending] of this.pendingApprovals) {
       if (pending.expiresAtMs <= now) {
         this.pendingApprovals.delete(token);
@@ -166,8 +207,115 @@ export class UnrestrictedApprovalManager {
     for (const [root, grant] of this.grants) {
       if (grant.expiresAtMs <= now) {
         this.grants.delete(root);
+        if (this.persistentGrantScopes.delete(root)) {
+          persistentGrantsChanged = true;
+        }
       }
     }
+    if (persistentGrantsChanged) {
+      this.writePersistentGrants();
+    }
+  }
+
+  private loadPersistentGrants(): void {
+    if (!this.persistence || !existsSync(this.persistence.storePath)) {
+      return;
+    }
+
+    try {
+      const encrypted = JSON.parse(readFileSync(this.persistence.storePath, "utf8")) as {
+        version?: number;
+        algorithm?: string;
+        iv?: string;
+        tag?: string;
+        ciphertext?: string;
+      };
+      if (
+        encrypted.version !== 1 ||
+        encrypted.algorithm !== APPROVAL_STORE_ALGORITHM ||
+        !encrypted.iv ||
+        !encrypted.tag ||
+        !encrypted.ciphertext
+      ) {
+        return;
+      }
+
+      const key = readOrCreateApprovalStoreKey(this.persistence.keyPath);
+      const decipher = createDecipheriv(
+        APPROVAL_STORE_ALGORITHM,
+        key,
+        Buffer.from(encrypted.iv, "base64"),
+      );
+      decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
+      const plaintext = Buffer.concat([
+        decipher.update(Buffer.from(encrypted.ciphertext, "base64")),
+        decipher.final(),
+      ]).toString("utf8");
+      const payload = JSON.parse(plaintext) as {
+        version?: number;
+        grants?: PersistentApprovalGrant[];
+      };
+      if (payload.version !== 1 || !Array.isArray(payload.grants)) {
+        return;
+      }
+
+      const now = Date.now();
+      for (const grant of payload.grants) {
+        if (
+          typeof grant.configuredRoot === "string" &&
+          Number.isFinite(grant.expiresAtMs) &&
+          grant.expiresAtMs > now
+        ) {
+          this.grants.set(grant.configuredRoot, {
+            expiresAtMs: grant.expiresAtMs,
+          });
+          this.persistentGrantScopes.add(grant.configuredRoot);
+        }
+      }
+    } catch {
+      return;
+    }
+  }
+
+  private writePersistentGrants(): void {
+    if (!this.persistence) {
+      return;
+    }
+
+    const grants = [...this.persistentGrantScopes]
+      .map((configuredRoot) => ({
+        configuredRoot,
+        expiresAtMs: this.grants.get(configuredRoot)?.expiresAtMs,
+      }))
+      .filter(
+        (grant): grant is PersistentApprovalGrant =>
+          typeof grant.expiresAtMs === "number" && grant.expiresAtMs > Date.now(),
+      );
+    const key = readOrCreateApprovalStoreKey(this.persistence.keyPath);
+    const iv = randomBytes(12);
+    const cipher = createCipheriv(APPROVAL_STORE_ALGORITHM, key, iv);
+    const plaintext = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        grants,
+      }),
+      "utf8",
+    );
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const payload = {
+      version: 1,
+      algorithm: APPROVAL_STORE_ALGORITHM,
+      iv: iv.toString("base64"),
+      tag: cipher.getAuthTag().toString("base64"),
+      ciphertext: ciphertext.toString("base64"),
+    };
+
+    mkdirSync(dirname(this.persistence.storePath), { recursive: true, mode: 0o700 });
+    writeFileSync(this.persistence.storePath, `${JSON.stringify(payload, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    chmodSync(this.persistence.storePath, 0o600);
   }
 }
 
@@ -184,6 +332,24 @@ class ApprovalRequestError extends Error {
   ) {
     super(message);
   }
+}
+
+function readOrCreateApprovalStoreKey(keyPath: string): Buffer {
+  mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
+  if (existsSync(keyPath)) {
+    const key = Buffer.from(readFileSync(keyPath, "utf8").trim(), "base64");
+    if (key.length === 32) {
+      return key;
+    }
+  }
+
+  const key = randomBytes(32);
+  writeFileSync(keyPath, `${key.toString("base64")}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  chmodSync(keyPath, 0o600);
+  return key;
 }
 
 export class DefaultUnrestrictedRunner implements UnrestrictedRunner {
@@ -288,7 +454,7 @@ export async function startUnrestrictedApprovalServer(
   auditLogger: AuditLogger,
 ): Promise<UnrestrictedApprovalServerHandle | undefined> {
   if (
-    !config.enableUnrestrictedRunner ||
+    (!config.enableUnrestrictedRunner && !config.enableUnrestrictedScriptRunner) ||
     !config.unrestrictedRunnerRequireSessionApproval
   ) {
     return undefined;
@@ -334,6 +500,7 @@ export async function startUnrestrictedApprovalServer(
         token,
         form.get("acceptedRisk") === "on",
         form.get("acknowledgement") ?? undefined,
+        form.get("rememberFor24h") === "on",
       );
       auditLogger.record({
         action: "op_unrestricted_runner_approve",
@@ -342,6 +509,7 @@ export async function startUnrestrictedApprovalServer(
           configuredRoot: result.configuredRoot,
           workspaceRoot: pending?.workspaceRoot,
           expiresAt: result.expiresAt,
+          remembered: result.remembered,
         },
       });
       sendApprovalPage(response, 200, "Unrestricted Runner Approved", successBody(result));
@@ -388,7 +556,7 @@ function shellCommand(command: string): { shell: string; shellArgs: string[] } {
 
   return {
     shell: "/bin/sh",
-    shellArgs: ["-lc", command],
+    shellArgs: ["-c", command],
   };
 }
 
@@ -503,19 +671,30 @@ function sendApprovalPage(
 }
 
 function approvalForm(pending: PendingApproval): string {
+  const sessionWide = pending.configuredRoot === "unrestricted-script-runner-session";
+  const scopeLabel = sessionWide
+    ? "Session approval scope"
+    : "Configured root";
+  const scopeValue = sessionWide
+    ? "All op_script_run commands for this MCP process"
+    : pending.configuredRoot;
   return `
     <h1>Approve Unrestricted Command Execution</h1>
     <div class="warning">
-      <p>This grants the current MCP process permission to run arbitrary local shell commands for the configured root below.</p>
-      <p>The path is an approval scope, not an operating-system sandbox. A command can still read, write, or execute outside this path if your OS permissions allow it.</p>
+      <p>This grants the current MCP process permission to run arbitrary local shell commands for the scope below.</p>
+      <p>The scope is an approval boundary, not an operating-system sandbox. A command can still read, write, or execute outside the requested workspace if your OS permissions allow it.</p>
     </div>
-    <p><strong>Configured root:</strong><br><code>${escapeHtml(pending.configuredRoot)}</code></p>
+    <p><strong>${scopeLabel}:</strong><br><code>${escapeHtml(scopeValue)}</code></p>
     <p><strong>Requested workspace:</strong><br><code>${escapeHtml(pending.workspaceRoot)}</code></p>
     <form method="post" action="/approve">
       <input type="hidden" name="token" value="${escapeHtml(pending.token)}">
       <label>
         <input type="checkbox" name="acceptedRisk">
         I understand and accept the local command execution risk for this MCP process.
+      </label>
+      <label>
+        <input type="checkbox" name="rememberFor24h">
+        Remember this approval for 24 hours on this machine.
       </label>
       <label>
         Type the exact acknowledgement phrase:
@@ -530,7 +709,7 @@ function approvalForm(pending: PendingApproval): string {
 function expiredBody(): string {
   return `
     <h1>Approval Link Expired</h1>
-    <p>Ask the MCP client to call <code>op_unrestricted_run</code> again to generate a fresh local approval link.</p>
+    <p>Ask the MCP client to call <code>op_script_run</code> or <code>op_unrestricted_run</code> again to generate a fresh local approval link.</p>
   `;
 }
 
@@ -540,6 +719,11 @@ function successBody(result: UnrestrictedApprovalResult): string {
     <p>Unrestricted command execution is now approved for:</p>
     <p><code>${escapeHtml(result.configuredRoot)}</code></p>
     <p>This in-memory approval expires at <code>${escapeHtml(result.expiresAt)}</code>.</p>
+    ${
+      result.remembered
+        ? "<p>This approval was remembered locally for future MCP sessions until that expiration time.</p>"
+        : ""
+    }
   `;
 }
 

@@ -47,8 +47,11 @@ import type {
   UnrestrictedRunner,
   UnrestrictedRunnerStatus,
 } from "./unrestricted-runner.js";
+import { UnrestrictedApprovalManager } from "./unrestricted-runner.js";
 
 class FakeOnePasswordService implements OnePasswordService {
+  public vaultListCalls = 0;
+
   public item: Item = {
     id: "item-1",
     title: "Root Login",
@@ -79,6 +82,7 @@ class FakeOnePasswordService implements OnePasswordService {
   };
 
   public async vaultList(_params?: VaultListParams): Promise<VaultOverview[]> {
+    this.vaultListCalls += 1;
     return [
       {
         id: "vault-1",
@@ -321,6 +325,38 @@ class FakeOpScriptRunner implements OpScriptRunner {
     };
   }
 
+  public async runCommand(
+    workspaceRoot: string,
+    command: string,
+    options: OpScriptRunOptions = {},
+  ) {
+    this.lastRunOptions = options;
+    const redact = (text: string) =>
+      (options.secretRedactionValues ?? []).reduce(
+        (redacted, secret) => redacted.replaceAll(secret, "[REDACTED]"),
+        text,
+      );
+
+    return {
+      workspaceRoot,
+      cwd: workspaceRoot,
+      command,
+      shell: "/bin/sh",
+      shellArgs: ["-c", command],
+      sensitiveOutput: true as const,
+      authMode: "manual-session" as const,
+      refreshedAuth: false,
+      stdout: redact(this.nextStdout),
+      stderr: redact(this.nextStderr),
+      errorMessage: this.nextErrorMessage ? redact(this.nextErrorMessage) : undefined,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      outputTruncated: false,
+      durationMs: 12,
+    };
+  }
+
   public status(): OpSessionStatus {
     return {
       enabled: true,
@@ -372,7 +408,7 @@ class FakeUnrestrictedRunner implements UnrestrictedRunner {
       cwd: workspaceRoot,
       command,
       shell: "/bin/sh",
-      shellArgs: ["-lc", command],
+      shellArgs: ["-c", command],
       sensitiveOutput: true,
       stdout: this.nextStdout,
       stderr: this.nextStderr,
@@ -401,23 +437,33 @@ class FakeUnrestrictedRunner implements UnrestrictedRunner {
 async function createClientAndServer(
   enableSecretReveal = false,
   options: {
+    authMode?: ServerConfig["authMode"];
     enableScriptRunner?: boolean;
     enableUnrestrictedRunner?: boolean;
     enableWrites?: boolean;
     enableDestructiveActions?: boolean;
     enablePermissionMutation?: boolean;
+    enableUnrestrictedScriptRunner?: boolean;
+    enableDiagnostics?: boolean;
     scriptRunner?: OpScriptRunner;
     unrestrictedRunner?: UnrestrictedRunner;
+    approvalManager?: UnrestrictedApprovalManager;
   } = {},
 ) {
   const config: ServerConfig = {
-    authMode: "desktop",
-    account: "TestAccount",
+    authMode: options.authMode ?? "desktop",
+    account: options.authMode === "connect" ? undefined : "TestAccount",
+    connectHost:
+      options.authMode === "connect" ? "http://127.0.0.1:8080" : undefined,
+    connectToken: options.authMode === "connect" ? "connect-token" : undefined,
+    connectTimeoutMs: options.authMode === "connect" ? 30_000 : undefined,
     enableSecretReveal,
     enableWrites: options.enableWrites ?? false,
     enableDestructiveActions: options.enableDestructiveActions ?? false,
     enablePermissionMutation: options.enablePermissionMutation ?? false,
-    enableScriptRunner: options.enableScriptRunner ?? false,
+    enableScriptRunner:
+      options.enableUnrestrictedScriptRunner || (options.enableScriptRunner ?? false),
+    enableUnrestrictedScriptRunner: options.enableUnrestrictedScriptRunner ?? false,
     scriptRunnerRoots: ["/workspace"],
     scriptRunnerAllowlistPaths: ["/workspace/.onepassword-mcp.json"],
     scriptRunnerAllowlistManifestPaths: [],
@@ -428,6 +474,9 @@ async function createClientAndServer(
     unrestrictedRunnerApprovalPort: 0,
     unrestrictedRunnerApprovalTtlMs: 12 * 60 * 60_000,
     unrestrictedRunnerCommandTimeoutMs: 600_000,
+    approvalRememberStorePath: "/tmp/onepassword-mcp-test-approvals.enc.json",
+    approvalRememberKeyPath: "/tmp/onepassword-mcp-test-approvals.key",
+    approvalRememberTtlMs: 24 * 60 * 60_000,
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "stdio",
@@ -440,18 +489,22 @@ async function createClientAndServer(
     httpSessionIdleMs: 15 * 60_000,
     httpRequestTimeoutMs: 30_000,
     auditLogPath: "/tmp/onepassword-mcp-test-audit.jsonl",
+    enableDiagnostics: options.enableDiagnostics ?? false,
     logLevel: "info",
     integrationName: "Test",
     integrationVersion: "0.1.0",
   };
   const auditLogger = new MemoryAuditLogger();
   const service = new FakeOnePasswordService();
+  const approvalManager =
+    options.approvalManager ?? new UnrestrictedApprovalManager(12 * 60 * 60_000);
   const server = createOnePasswordMcpServer(
     config,
     service,
     auditLogger,
     options.scriptRunner,
     options.unrestrictedRunner,
+    approvalManager,
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({
@@ -506,6 +559,40 @@ test("registers expected tools", async () => {
   assert(!tools.tools.some((tool) => tool.name === "op_unrestricted_run"));
 });
 
+test("diagnostics audit records MCP requests without raw arguments", async () => {
+  const { auditLogger, client } = await createClientAndServer(false, {
+    enableDiagnostics: true,
+  });
+
+  await client.listTools();
+  await client.callTool({
+    name: "secret_reveal",
+    arguments: {
+      reference: "op://vault/item/password",
+      reason: "diagnostic test",
+      acknowledgePlaintext: SECRET_REVEAL_ACK,
+    },
+  });
+
+  assert(
+    auditLogger.events.some(
+      (event) =>
+        event.action === "mcp_request" &&
+        event.outcome === "success" &&
+        event.metadata.method === "tools/list",
+    ),
+  );
+  assert(
+    auditLogger.events.some(
+      (event) =>
+        event.action === "mcp_request" &&
+        event.metadata.method === "tools/call" &&
+        event.metadata.toolName === "secret_reveal",
+    ),
+  );
+  assert.doesNotMatch(JSON.stringify(auditLogger.events), /op:\/\/vault\/item\/password/);
+});
+
 test("registers write tools only when enabled", async () => {
   const { client } = await createClientAndServer(false, { enableWrites: true });
   const tools = await client.listTools();
@@ -515,6 +602,42 @@ test("registers write tools only when enabled", async () => {
   assert(tools.tools.some((tool) => tool.name === "vault_create"));
   assert(tools.tools.some((tool) => tool.name === "item_update"));
   assert(!tools.tools.some((tool) => tool.name === "item_delete"));
+});
+
+test("connect mode registers only Connect-supported backend tools", async () => {
+  const { client } = await createClientAndServer(false, {
+    authMode: "connect",
+    enableWrites: true,
+    enableDestructiveActions: true,
+    enablePermissionMutation: true,
+  });
+  const tools = await client.listTools();
+  const names = new Set(tools.tools.map((tool) => tool.name));
+
+  assert(names.has("vault_list"));
+  assert(names.has("vault_get"));
+  assert(names.has("item_search"));
+  assert(names.has("item_get_metadata"));
+  assert(names.has("password_create"));
+  assert(names.has("password_update"));
+  assert(names.has("item_create"));
+  assert(names.has("item_update"));
+  assert(names.has("item_delete"));
+  assert(names.has("password_read"));
+  assert(names.has("secret_reveal"));
+
+  assert(!names.has("vault_create"));
+  assert(!names.has("vault_update"));
+  assert(!names.has("vault_delete"));
+  assert(!names.has("group_get"));
+  assert(!names.has("vault_permissions_get"));
+  assert(!names.has("vault_permissions_grant_group"));
+  assert(!names.has("vault_permissions_update_group"));
+  assert(!names.has("vault_permissions_revoke_group"));
+  assert(!names.has("item_archive"));
+  assert(!names.has("environment_get_variables"));
+  assert(!names.has("environment_get_variable"));
+  assert(!names.has("environment_reveal_variable"));
 });
 
 test("registers script runner tools when enabled", async () => {
@@ -598,6 +721,21 @@ test("op_session_status exposes runtime gates when script runner is disabled", a
   assert.equal(payload.unrestrictedRunner.configuredRootCount, 0);
 });
 
+test("op_session_status reports active Connect backend", async () => {
+  const { client } = await createClientAndServer(false, { authMode: "connect" });
+  const status = await client.callTool({
+    name: "op_session_status",
+    arguments: {},
+  });
+  const payload = status.structuredContent as {
+    backend: string;
+    diagnostics: { backend: string };
+  };
+
+  assert.equal(payload.backend, "connect");
+  assert.equal(payload.diagnostics.backend, "connect");
+});
+
 test("registers prompts and resources", async () => {
   const { client } = await createClientAndServer();
   const prompts = await client.listPrompts();
@@ -613,6 +751,14 @@ test("registers prompts and resources", async () => {
       template.uriTemplate.includes("onepassword://vaults/{vaultId}/items"),
     ),
   );
+});
+
+test("resources/list does not touch the 1Password SDK", async () => {
+  const { client, service } = await createClientAndServer();
+
+  await client.listResources();
+
+  assert.equal(service.vaultListCalls, 0);
 });
 
 test("can read fixed and templated resources", async () => {
@@ -1098,6 +1244,148 @@ test("script runner audits failed allowlist reloads", async () => {
   assert.match(auditEvent?.errorMessage ?? "", /invalid allowlist/);
 });
 
+test("unrestricted script runner ignores allowlists and gates free commands once per session", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  scriptRunner.nextStdout = "connected with supabase-db-password-secret\n";
+  const approvalManager = new UnrestrictedApprovalManager(60_000);
+  approvalManager.setApprovalBaseUrl("http://127.0.0.1:19000");
+  const { client, auditLogger, service } = await createClientAndServer(false, {
+    enableUnrestrictedScriptRunner: true,
+    scriptRunner,
+    approvalManager,
+  });
+
+  const listed = await client.callTool({
+    name: "op_script_list",
+    arguments: {
+      workspaceRoot: "/workspace",
+    },
+  });
+  const listPayload = listed.structuredContent as {
+    unrestrictedScriptRunner: boolean;
+    commands: unknown[];
+  };
+  assert.equal(listPayload.unrestrictedScriptRunner, true);
+  assert.deepEqual(listPayload.commands, []);
+
+  const reload = await client.callTool({
+    name: "op_script_reload_allowlists",
+    arguments: {
+      reason: "Need to verify allowlists are ignored",
+    },
+  });
+  assert.equal((reload.structuredContent as { ignored: boolean }).ignored, true);
+  assert.equal(scriptRunner.reloadCalls, 0);
+
+  const authorization = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      command: "node scripts/deploy.mjs",
+      reason: "Need free command execution with injected secrets",
+      envSecretRefs: {
+        SUPABASE_DB_PASSWORD: "op://vault/supabase-db-password/password",
+      },
+    },
+  });
+  const authorizationPayload = authorization.structuredContent as {
+    authorizationRequired: boolean;
+    approvalUrl: string;
+    acknowledgement: string;
+  };
+  const token = new URL(authorizationPayload.approvalUrl).searchParams.get("token") ?? "";
+
+  assert.equal(authorizationPayload.authorizationRequired, true);
+  assert.match(authorizationPayload.approvalUrl, /^http:\/\/127\.0\.0\.1:19000\/approve/);
+  assert.equal(authorizationPayload.acknowledgement, UNRESTRICTED_RUNNER_ACK);
+  assert.equal(service.secretResolveCalls.length, 0);
+  assert.equal(auditLogger.events.at(-1)?.action, "op_script_run_authorization_required");
+
+  approvalManager.approveToken(token, true, UNRESTRICTED_RUNNER_ACK);
+
+  const status = await client.callTool({
+    name: "op_session_status",
+    arguments: {},
+  });
+  const statusPayload = status.structuredContent as {
+    unrestrictedScriptRunnerEnabled: boolean;
+    unrestrictedRunner: {
+      enabled: boolean;
+      mode: string;
+      configuredRoot: string;
+      approvedRootCount: number;
+      rememberTtlMs: number;
+    };
+  };
+  assert.equal(statusPayload.unrestrictedScriptRunnerEnabled, true);
+  assert.equal(statusPayload.unrestrictedRunner.enabled, true);
+  assert.equal(statusPayload.unrestrictedRunner.mode, "op_script_run");
+  assert.equal(
+    statusPayload.unrestrictedRunner.configuredRoot,
+    "unrestricted-script-runner-session",
+  );
+  assert.equal(statusPayload.unrestrictedRunner.approvedRootCount, 1);
+  assert.equal(statusPayload.unrestrictedRunner.rememberTtlMs, 24 * 60 * 60_000);
+
+  const missingOutputAck = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      command: "node scripts/deploy.mjs",
+      reason: "Need free command execution with injected secrets",
+      envSecretRefs: {
+        SUPABASE_DB_PASSWORD: "op://vault/supabase-db-password/password",
+      },
+      returnOutput: true,
+    },
+  });
+  const missingAckPayload = missingOutputAck.structuredContent as {
+    executionSkipped: boolean;
+    outputState: string;
+    requiredAcknowledgement: string;
+  };
+
+  assert.equal(missingAckPayload.executionSkipped, true);
+  assert.equal(missingAckPayload.outputState, "skipped_ack_missing");
+  assert.equal(missingAckPayload.requiredAcknowledgement, SECRET_REVEAL_ACK);
+  assert.equal(scriptRunner.lastRunOptions, undefined);
+  assert.equal(service.secretResolveCalls.length, 0);
+
+  const result = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      command: "node scripts/deploy.mjs",
+      reason: "Need free command execution with injected secrets",
+      envSecretRefs: {
+        SUPABASE_DB_PASSWORD: "op://vault/supabase-db-password/password",
+      },
+      returnOutput: true,
+      acknowledgePlaintext: SECRET_REVEAL_ACK,
+    },
+  });
+  const payload = result.structuredContent as {
+    mode: string;
+    stdout: string;
+    commandHash: string;
+    outputReturned: boolean;
+    envSecretRefCount: number;
+    injectedSecretEnvVars: string[];
+  };
+  const auditPayload = JSON.stringify(auditLogger.events.at(-1));
+
+  assert.equal(result.isError, false);
+  assert.equal(payload.mode, "unrestricted");
+  assert.equal(payload.outputReturned, true);
+  assert.equal(payload.stdout, "connected with [REDACTED]\n");
+  assert.match(payload.commandHash, /^[a-f0-9]{64}$/);
+  assert.equal(payload.envSecretRefCount, 1);
+  assert.deepEqual(payload.injectedSecretEnvVars, ["SUPABASE_DB_PASSWORD"]);
+  assert.equal(scriptRunner.lastRunOptions?.extraEnv?.SUPABASE_DB_PASSWORD, "supabase-db-password-secret");
+  assert(!auditPayload.includes("node scripts/deploy.mjs"));
+  assert(!auditPayload.includes("supabase-db-password-secret"));
+});
+
 test("script runner injects 1Password secrets without returning plaintext", async () => {
   const scriptRunner = new FakeOpScriptRunner();
   scriptRunner.nextStdout = "connected with supabase-db-password-secret\n";
@@ -1144,7 +1432,7 @@ test("script runner injects 1Password secrets without returning plaintext", asyn
   assert(!auditPayload.includes("supabase-db-password-secret"));
 });
 
-test("script runner withholds output for injected secrets without acknowledgement", async () => {
+test("script runner requires acknowledgement before executing injected-secret output", async () => {
   const scriptRunner = new FakeOpScriptRunner();
   scriptRunner.nextStdout = "connected with supabase-db-password-secret\n";
   scriptRunner.nextErrorMessage = "failed with supabase-db-password-secret";
@@ -1167,6 +1455,7 @@ test("script runner withholds output for injected secrets without acknowledgemen
   });
   const textContent = result.content as Array<{ type: string; text?: string }>;
   const payload = result.structuredContent as {
+    executionSkipped: boolean;
     outputRequested: boolean;
     outputReturned: boolean;
     outputState: string;
@@ -1178,15 +1467,13 @@ test("script runner withholds output for injected secrets without acknowledgemen
   };
 
   assert.notEqual(result.isError, true);
-  assert.equal(service.secretResolveCalls[0], "op://vault/supabase-db-password/password");
-  assert.equal(
-    scriptRunner.lastRunOptions?.extraEnv?.SUPABASE_DB_PASSWORD,
-    "supabase-db-password-secret",
-  );
-  assert.match(textContent[0]?.text ?? "", /requires acknowledgePlaintext/);
+  assert.equal(service.secretResolveCalls.length, 0);
+  assert.equal(scriptRunner.lastRunOptions, undefined);
+  assert.match(textContent[0]?.text ?? "", /was not executed/);
+  assert.equal(payload.executionSkipped, true);
   assert.equal(payload.outputRequested, true);
   assert.equal(payload.outputReturned, false);
-  assert.equal(payload.outputState, "withheld_ack_missing");
+  assert.equal(payload.outputState, "skipped_ack_missing");
   assert.equal(payload.requiredAcknowledgement, SECRET_REVEAL_ACK);
   assert.equal(payload.stdout, undefined);
   assert.equal(payload.errorMessage, undefined);
@@ -1243,7 +1530,7 @@ test("script runner only returns command output with reveal acknowledgement", as
   assert.equal(payload.stdout, "done\n");
 });
 
-test("script runner withholds sensitive output without reveal acknowledgement", async () => {
+test("script runner requires acknowledgement before executing sensitive output", async () => {
   const scriptRunner = new FakeOpScriptRunner();
   scriptRunner.nextStdout = "secret output\n";
   scriptRunner.nextErrorMessage = "secret error";
@@ -1262,6 +1549,7 @@ test("script runner withholds sensitive output without reveal acknowledgement", 
     },
   });
   const payload = result.structuredContent as {
+    executionSkipped: boolean;
     outputRequested: boolean;
     outputReturned: boolean;
     outputState: string;
@@ -1271,10 +1559,11 @@ test("script runner withholds sensitive output without reveal acknowledgement", 
   };
 
   assert.notEqual(result.isError, true);
-  assert.equal(scriptRunner.lastRunOptions !== undefined, true);
+  assert.equal(scriptRunner.lastRunOptions, undefined);
+  assert.equal(payload.executionSkipped, true);
   assert.equal(payload.outputRequested, true);
   assert.equal(payload.outputReturned, false);
-  assert.equal(payload.outputState, "withheld_ack_missing");
+  assert.equal(payload.outputState, "skipped_ack_missing");
   assert.equal(payload.requiredAcknowledgement, SECRET_REVEAL_ACK);
   assert.equal(payload.stdout, undefined);
   assert.equal(payload.errorMessage, undefined);
@@ -1356,7 +1645,7 @@ test("unrestricted runner returns local approval URL before running", async () =
   );
 });
 
-test("unrestricted runner executes once and withholds output without plaintext acknowledgement", async () => {
+test("unrestricted runner requires acknowledgement before execution when output is requested", async () => {
   const unrestrictedRunner = new FakeUnrestrictedRunner();
   unrestrictedRunner.nextStdout = "token-like output\n";
   unrestrictedRunner.nextErrorMessage = "sensitive error";
@@ -1376,6 +1665,7 @@ test("unrestricted runner executes once and withholds output without plaintext a
   });
   const textContent = result.content as Array<{ type: string; text?: string }>;
   const payload = result.structuredContent as {
+    executionSkipped: boolean;
     outputRequested: boolean;
     outputReturned: boolean;
     outputState: string;
@@ -1387,11 +1677,12 @@ test("unrestricted runner executes once and withholds output without plaintext a
   const auditPayload = auditLogger.events.at(-1)?.metadata ?? {};
 
   assert.notEqual(result.isError, true);
-  assert.equal(unrestrictedRunner.lastCommand, "printf token-like-output");
-  assert.match(textContent[0]?.text ?? "", /requires acknowledgePlaintext/);
+  assert.equal(unrestrictedRunner.lastCommand, undefined);
+  assert.match(textContent[0]?.text ?? "", /was not executed/);
+  assert.equal(payload.executionSkipped, true);
   assert.equal(payload.outputRequested, true);
   assert.equal(payload.outputReturned, false);
-  assert.equal(payload.outputState, "withheld_ack_missing");
+  assert.equal(payload.outputState, "skipped_ack_missing");
   assert.equal(payload.requiredAcknowledgement, SECRET_REVEAL_ACK);
   assert.equal(payload.stdout, undefined);
   assert.equal(payload.errorMessage, undefined);

@@ -3,7 +3,7 @@ import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { UNRESTRICTED_RUNNER_ACK } from "./constants.js";
 
-export type AuthMode = "desktop" | "service-account";
+export type AuthMode = "desktop" | "service-account" | "connect";
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type OpCliAuthMode = "auto" | "desktop" | "manual-session" | "service-account";
 export type TransportMode = "stdio" | "http";
@@ -12,11 +12,15 @@ export interface ServerConfig {
   authMode: AuthMode;
   account?: string;
   serviceAccountToken?: string;
+  connectHost?: string;
+  connectToken?: string;
+  connectTimeoutMs?: number;
   enableSecretReveal: boolean;
   enableWrites: boolean;
   enableDestructiveActions: boolean;
   enablePermissionMutation: boolean;
   enableScriptRunner: boolean;
+  enableUnrestrictedScriptRunner: boolean;
   scriptRunnerRoots: string[];
   scriptRunnerAllowlistPaths: string[];
   scriptRunnerAllowlistManifestPaths: string[];
@@ -27,6 +31,9 @@ export interface ServerConfig {
   unrestrictedRunnerApprovalPort: number;
   unrestrictedRunnerApprovalTtlMs: number;
   unrestrictedRunnerCommandTimeoutMs: number;
+  approvalRememberStorePath: string;
+  approvalRememberKeyPath: string;
+  approvalRememberTtlMs: number;
   opCliPath: string;
   opCliAuthMode: OpCliAuthMode;
   transport: TransportMode;
@@ -40,6 +47,7 @@ export interface ServerConfig {
   httpSessionIdleMs: number;
   httpRequestTimeoutMs: number;
   auditLogPath: string;
+  enableDiagnostics: boolean;
   logLevel: LogLevel;
   integrationName: string;
   integrationVersion: string;
@@ -51,6 +59,16 @@ const DEFAULT_AUDIT_LOG_PATH = join(
   homedir(),
   ".onepassword-mcp",
   "audit.jsonl",
+);
+const DEFAULT_APPROVAL_REMEMBER_STORE_PATH = join(
+  homedir(),
+  ".onepassword-mcp",
+  "approval-grants.enc.json",
+);
+const DEFAULT_APPROVAL_REMEMBER_KEY_PATH = join(
+  homedir(),
+  ".onepassword-mcp",
+  "approval-grants.key",
 );
 
 function validateFlagValue(name: string, value: string | undefined): string {
@@ -224,6 +242,28 @@ function isLocalHttpHost(host: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
+function parseConnectHost(value: string | undefined): string {
+  const rawHost = value ?? "http://127.0.0.1:8080";
+  let url: URL;
+  try {
+    url = new URL(rawHost);
+  } catch {
+    throw new Error(`Invalid Connect host URL: ${rawHost}`);
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`Connect host must use http or https: ${rawHost}`);
+  }
+  if (!isLocalHttpHost(url.hostname)) {
+    throw new Error("Connect host must use localhost, 127.0.0.1, or ::1 for this POC.");
+  }
+  if (url.username || url.password) {
+    throw new Error("Connect host must not include credentials.");
+  }
+
+  return url.toString().replace(/\/$/, "");
+}
+
 function resolveScriptRunnerAuthMode(
   authMode: AuthMode,
   opCliAuthMode: OpCliAuthMode,
@@ -253,14 +293,18 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "Usage: mcp-1password [options]",
         "",
         "Options:",
-        "  --auth-mode=desktop|service-account",
+        "  --auth-mode=desktop|service-account|connect",
         "  --account=<1password account name or UUID>",
         "  --service-account-token=<token>",
+        "  --connect-host=<http://127.0.0.1:8080>",
+        "  --connect-token=<token>",
+        "  --connect-timeout-ms=<milliseconds>",
         "  --enable-secret-reveal=true|false",
         "  --enable-writes=true|false",
         "  --enable-destructive-actions=true|false",
         "  --enable-permission-mutation=true|false",
         "  --enable-script-runner=true|false",
+        "  --enable-unrestricted-script-runner=true|false",
         "  --script-runner-root=<absolute trusted root> (repeatable)",
         "  --script-runner-allowlist=<absolute allowlist file> (repeatable)",
         "  --script-runner-allowlist-manifest=<absolute manifest file> (repeatable)",
@@ -271,6 +315,9 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --unrestricted-runner-approval-port=<port>",
         "  --unrestricted-runner-approval-ttl-ms=<milliseconds>",
         "  --unrestricted-runner-command-timeout-ms=<milliseconds>",
+        "  --approval-remember-store-path=<absolute encrypted grants file>",
+        "  --approval-remember-key-path=<absolute local key file>",
+        "  --approval-remember-ttl-ms=<milliseconds>",
         "  --acknowledge-unrestricted-runner=<acknowledgement>",
         "  --op-cli-path=<path>",
         "  --op-cli-auth-mode=auto|desktop|manual-session|service-account",
@@ -284,6 +331,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --http-session-idle-ms=<milliseconds>",
         "  --http-request-timeout-ms=<milliseconds>",
         "  --audit-log-path=<path>",
+        "  --diagnostics=true|false",
         "  --log-level=debug|info|warn|error",
       ].join("\n"),
     );
@@ -293,7 +341,11 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     process.env.OP_MCP_AUTH_MODE ??
     "desktop") as AuthMode;
 
-  if (authMode !== "desktop" && authMode !== "service-account") {
+  if (
+    authMode !== "desktop" &&
+    authMode !== "service-account" &&
+    authMode !== "connect"
+  ) {
     throw new Error(`Unsupported auth mode: ${authMode}`);
   }
 
@@ -302,6 +354,22 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     readFlagValue(argv, "service-account-token") ??
     process.env.OP_SERVICE_ACCOUNT_TOKEN ??
     process.env.OP_MCP_SERVICE_ACCOUNT_TOKEN;
+  const connectHostValue =
+    readFlagValue(argv, "connect-host") ?? process.env.OP_CONNECT_HOST;
+  const connectHost =
+    authMode === "connect" ? parseConnectHost(connectHostValue) : undefined;
+  const connectToken = readFlagValue(argv, "connect-token") ?? process.env.OP_CONNECT_TOKEN;
+  const connectTimeoutMs =
+    authMode === "connect"
+      ? parseIntegerOption(
+          "Connect request timeout",
+          readFlagValue(argv, "connect-timeout-ms") ??
+            process.env.OP_MCP_CONNECT_TIMEOUT_MS,
+          30_000,
+          1_000,
+          10 * 60_000,
+        )
+      : undefined;
 
   if (authMode === "desktop" && !account) {
     throw new Error(
@@ -313,6 +381,10 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     throw new Error(
       "Service-account auth requires --service-account-token or OP_SERVICE_ACCOUNT_TOKEN.",
     );
+  }
+
+  if (authMode === "connect" && !connectToken) {
+    throw new Error("Connect auth requires --connect-token or OP_CONNECT_TOKEN.");
   }
 
   const enableSecretReveal = parseBoolean(
@@ -334,11 +406,18 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
       process.env.OP_MCP_ENABLE_PERMISSION_MUTATION,
     false,
   );
-  const enableScriptRunner = parseBoolean(
-    readFlagValue(argv, "enable-script-runner") ??
-      process.env.OP_MCP_ENABLE_SCRIPT_RUNNER,
+  const enableUnrestrictedScriptRunner = parseBoolean(
+    readFlagValue(argv, "enable-unrestricted-script-runner") ??
+      process.env.OP_MCP_ENABLE_UNRESTRICTED_SCRIPT_RUNNER,
     false,
   );
+  const enableScriptRunner =
+    enableUnrestrictedScriptRunner ||
+    parseBoolean(
+      readFlagValue(argv, "enable-script-runner") ??
+        process.env.OP_MCP_ENABLE_SCRIPT_RUNNER,
+      false,
+    );
   const scriptRunnerRoots = [
     ...readFlagValues(argv, "script-runner-root"),
     ...parsePathList(
@@ -402,6 +481,22 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     600_000,
     1_000,
     60 * 60_000,
+  );
+  const approvalRememberStorePath =
+    readFlagValue(argv, "approval-remember-store-path") ??
+    process.env.OP_MCP_APPROVAL_REMEMBER_STORE_PATH ??
+    DEFAULT_APPROVAL_REMEMBER_STORE_PATH;
+  const approvalRememberKeyPath =
+    readFlagValue(argv, "approval-remember-key-path") ??
+    process.env.OP_MCP_APPROVAL_REMEMBER_KEY_PATH ??
+    DEFAULT_APPROVAL_REMEMBER_KEY_PATH;
+  const approvalRememberTtlMs = parseIntegerOption(
+    "approval remember TTL",
+    readFlagValue(argv, "approval-remember-ttl-ms") ??
+      process.env.OP_MCP_APPROVAL_REMEMBER_TTL_MS,
+    24 * 60 * 60_000,
+    1_000,
+    7 * 24 * 60 * 60_000,
   );
   const unrestrictedRunnerStartupAcknowledgement =
     readFlagValue(argv, "acknowledge-unrestricted-runner") ??
@@ -471,6 +566,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
 
   if (enableScriptRunner) {
     if (
+      !enableUnrestrictedScriptRunner &&
       scriptRunnerAllowlistPaths.length === 0 &&
       scriptRunnerAllowlistManifestPaths.length === 0
     ) {
@@ -517,6 +613,12 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     }
   }
 
+  if (enableUnrestrictedScriptRunner && !isLocalHttpHost(unrestrictedRunnerApprovalHost)) {
+    throw new Error(
+      "Unrestricted script runner approval host must be localhost, 127.0.0.1, or ::1.",
+    );
+  }
+
   if (enableUnrestrictedRunner) {
     if (unrestrictedRunnerRoots.length === 0) {
       throw new Error(
@@ -543,21 +645,40 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     }
   }
 
+  if (!isAbsolute(approvalRememberStorePath)) {
+    throw new Error(
+      `Approval remember store path must be absolute: ${approvalRememberStorePath}`,
+    );
+  }
+  if (!isAbsolute(approvalRememberKeyPath)) {
+    throw new Error(
+      `Approval remember key path must be absolute: ${approvalRememberKeyPath}`,
+    );
+  }
+
   const auditLogPath =
     readFlagValue(argv, "audit-log-path") ??
     process.env.OP_MCP_AUDIT_LOG_PATH ??
     DEFAULT_AUDIT_LOG_PATH;
   mkdirSync(dirname(auditLogPath), { recursive: true, mode: 0o700 });
+  const enableDiagnostics = parseBoolean(
+    readFlagValue(argv, "diagnostics") ?? process.env.OP_MCP_DIAGNOSTICS,
+    false,
+  );
 
   return {
     authMode,
     account,
     serviceAccountToken,
+    connectHost,
+    connectToken: authMode === "connect" ? connectToken : undefined,
+    connectTimeoutMs,
     enableSecretReveal,
     enableWrites,
     enableDestructiveActions,
     enablePermissionMutation,
     enableScriptRunner,
+    enableUnrestrictedScriptRunner,
     scriptRunnerRoots,
     scriptRunnerAllowlistPaths,
     scriptRunnerAllowlistManifestPaths,
@@ -568,6 +689,9 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     unrestrictedRunnerApprovalPort,
     unrestrictedRunnerApprovalTtlMs,
     unrestrictedRunnerCommandTimeoutMs,
+    approvalRememberStorePath,
+    approvalRememberKeyPath,
+    approvalRememberTtlMs,
     opCliPath,
     opCliAuthMode,
     transport,
@@ -581,6 +705,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     httpSessionIdleMs,
     httpRequestTimeoutMs,
     auditLogPath,
+    enableDiagnostics,
     logLevel: parseLogLevel(
       readFlagValue(argv, "log-level") ?? process.env.OP_MCP_LOG_LEVEL,
     ),

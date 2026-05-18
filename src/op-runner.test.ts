@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ServerConfig } from "./config.js";
 import {
   DEFAULT_OUTPUT_LIMIT_BYTES,
@@ -17,6 +18,15 @@ import {
 
 const TEST_COMMAND = process.execPath;
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   return {
     authMode: "desktop",
@@ -26,6 +36,7 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     enableDestructiveActions: false,
     enablePermissionMutation: false,
     enableScriptRunner: true,
+    enableUnrestrictedScriptRunner: false,
     scriptRunnerRoots: [],
     scriptRunnerAllowlistPaths: [],
     scriptRunnerAllowlistManifestPaths: [],
@@ -36,6 +47,9 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     unrestrictedRunnerApprovalPort: 0,
     unrestrictedRunnerApprovalTtlMs: 12 * 60 * 60_000,
     unrestrictedRunnerCommandTimeoutMs: 600_000,
+    approvalRememberStorePath: "/tmp/onepassword-mcp-test-approvals.enc.json",
+    approvalRememberKeyPath: "/tmp/onepassword-mcp-test-approvals.key",
+    approvalRememberTtlMs: 24 * 60 * 60_000,
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "stdio",
@@ -48,6 +62,7 @@ function createConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
     httpSessionIdleMs: 15 * 60_000,
     httpRequestTimeoutMs: 30_000,
     auditLogPath: "/tmp/onepassword-mcp-test-audit.jsonl",
+    enableDiagnostics: false,
     logLevel: "info",
     integrationName: "Test",
     integrationVersion: "0.1.0",
@@ -187,6 +202,45 @@ test("loadConfiguredScriptAllowlists supports multiple workspaceRoots in one all
   assert.equal(allowlists.length, 2);
   assert.equal(allowlists[0]?.commands[0]?.id, "deploy");
   assert.equal(allowlists[1]?.commands[0]?.id, "deploy");
+});
+
+test("DefaultOpScriptRunner matches allowlist for sibling workspace root prefixes", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    workspaceRootPrefixes: ["."],
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const siblingWorkspace = `${workspace}-branch`;
+  const unrelatedWorkspace = `${workspace}branch`;
+  await mkdir(siblingWorkspace, { recursive: true });
+  await mkdir(unrelatedWorkspace, { recursive: true });
+
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "{}\n" }),
+    processResult({ stdout: "ok\n" }),
+  ]);
+  const config = createScriptRunnerConfig(workspace);
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const allowlist = await runner.list(siblingWorkspace);
+  const result = await runner.run(siblingWorkspace, "deploy");
+  const resolvedWorkspace = await realpath(workspace);
+  const resolvedSiblingWorkspace = await realpath(siblingWorkspace);
+  const commandCall = processRunner.calls.find((call) => call.command === TEST_COMMAND);
+
+  assert.equal(allowlist.workspaceRoot, resolvedWorkspace);
+  assert.equal(allowlist.workspaceRootMatch, "prefix");
+  assert.equal(result.workspaceRoot, resolvedSiblingWorkspace);
+  assert.equal(commandCall?.cwd, resolvedSiblingWorkspace);
+  await assert.rejects(
+    () => runner.list(unrelatedWorkspace),
+    /does not have a startup-configured script allowlist/,
+  );
 });
 
 test("loadConfiguredScriptAllowlists resolves allowlists from startup manifests", async () => {
@@ -496,11 +550,12 @@ test("DefaultOpScriptRunner matches allowlist for nested workspace roots", async
   const allowlist = await runner.list(nestedWorkspace);
   const result = await runner.run(nestedWorkspace, "deploy");
   const resolvedWorkspace = await realpath(workspace);
+  const resolvedNestedWorkspace = await realpath(nestedWorkspace);
   const commandCall = processRunner.calls.find((call) => call.command === TEST_COMMAND);
 
   assert.equal(allowlist.workspaceRoot, resolvedWorkspace);
-  assert.equal(result.workspaceRoot, resolvedWorkspace);
-  assert.equal(commandCall?.cwd, resolvedWorkspace);
+  assert.equal(result.workspaceRoot, resolvedNestedWorkspace);
+  assert.equal(commandCall?.cwd, resolvedNestedWorkspace);
 });
 
 test("desktop auth validates the configured account and injects OP_ACCOUNT", async () => {
@@ -811,6 +866,28 @@ test("service-account auth does not rerun scripts after auth-looking failures", 
   assert.equal(commandCalls.length, 1);
 });
 
+test("unrestricted script runner uses a non-login shell", async () => {
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), "unrestricted-script-shell-")));
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "ok\n" }),
+  ]);
+  const config = createConfig({
+    authMode: "service-account",
+    serviceAccountToken: "service-token",
+    opCliAuthMode: "service-account",
+    enableUnrestrictedScriptRunner: true,
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.runCommand(workspace, "echo ok");
+
+  assert.equal(result.shell, "/bin/sh");
+  assert.deepEqual(result.shellArgs, ["-c", "echo ok"]);
+  assert.equal(processRunner.calls[0]?.command, "/bin/sh");
+  assert.deepEqual(processRunner.calls[0]?.args, ["-c", "echo ok"]);
+});
+
 test("service-account auth injects OP_SERVICE_ACCOUNT_TOKEN into a minimal env", async () => {
   process.env.OP_MCP_TEST_SECRET = "must-not-leak";
   const processRunner = new FakeProcessRunner([]);
@@ -885,4 +962,32 @@ test("NodeProcessRunner force-kills commands that ignore SIGTERM", async () => {
   assert.equal(result.timedOut, true);
   assert.equal(result.signal, "SIGKILL");
   assert.ok(result.durationMs < 4_500);
+});
+
+test("NodeProcessRunner kills shell child process groups on timeout", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  const runner = new NodeProcessRunner();
+  const tempDir = await mkdtemp(join(tmpdir(), "op-runner-process-group-"));
+  const pidFile = join(tempDir, "child.pid");
+  const childScript = [
+    `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+    "setInterval(() => {}, 1000);",
+  ].join("");
+  const shellScript = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(childScript)}`;
+
+  const result = await runner.run("/bin/sh", ["-c", shellScript], {
+    timeoutMs: 1_000,
+    maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+  });
+  const childPid = Number(await readFile(pidFile, "utf8"));
+
+  for (let attempts = 0; attempts < 20 && processExists(childPid); attempts += 1) {
+    await delay(50);
+  }
+
+  assert.equal(result.timedOut, true);
+  assert.equal(processExists(childPid), false);
 });

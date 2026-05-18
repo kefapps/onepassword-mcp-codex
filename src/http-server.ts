@@ -198,7 +198,19 @@ export async function startOnePasswordHttpServer(
   scriptRunner: OpScriptRunner,
   unrestrictedRunner: UnrestrictedRunner = new DefaultUnrestrictedRunner(
     config,
-    new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs),
+    new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs, {
+      storePath: config.approvalRememberStorePath,
+      keyPath: config.approvalRememberKeyPath,
+      rememberTtlMs: config.approvalRememberTtlMs,
+    }),
+  ),
+  approvalManager: UnrestrictedApprovalManager = new UnrestrictedApprovalManager(
+    config.unrestrictedRunnerApprovalTtlMs,
+    {
+      storePath: config.approvalRememberStorePath,
+      keyPath: config.approvalRememberKeyPath,
+      rememberTtlMs: config.approvalRememberTtlMs,
+    },
   ),
 ): Promise<OnePasswordHttpServerHandle> {
   const transports = new Map<string, SessionEntry>();
@@ -294,6 +306,7 @@ export async function startOnePasswordHttpServer(
           auditLogger,
           scriptRunner,
           unrestrictedRunner,
+          approvalManager,
         );
         await mcpServer.connect(transport);
       }
