@@ -641,14 +641,16 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "Unrestricted runner approval host must be localhost, 127.0.0.1, or ::1.",
       );
     }
-    if (
-      !unrestrictedRunnerRequireSessionApproval &&
-      unrestrictedRunnerStartupAcknowledgement !== UNRESTRICTED_RUNNER_ACK
-    ) {
-      throw new Error(
-        `Disabling unrestricted runner session approval requires --acknowledge-unrestricted-runner=${UNRESTRICTED_RUNNER_ACK}.`,
-      );
-    }
+  }
+
+  if (
+    (enableUnrestrictedRunner || enableUnrestrictedScriptRunner) &&
+    !unrestrictedRunnerRequireSessionApproval &&
+    unrestrictedRunnerStartupAcknowledgement !== UNRESTRICTED_RUNNER_ACK
+  ) {
+    throw new Error(
+      `Disabling unrestricted runner session approval requires --acknowledge-unrestricted-runner=${UNRESTRICTED_RUNNER_ACK}.`,
+    );
   }
 
   if (!isAbsolute(approvalRememberStorePath)) {
