@@ -17,8 +17,17 @@ import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AuditLogger } from "./audit.js";
-import { SDK_CAPABILITIES } from "./capabilities.js";
+import {
+  SDK_CAPABILITIES,
+  backendCapabilities,
+  effectiveSupportedTools,
+} from "./capabilities.js";
 import type { ServerConfig } from "./config.js";
+import {
+  mcpRequestMetadata,
+  recordDiagnosticAudit,
+  type RuntimeDiagnostics,
+} from "./diagnostics.js";
 import {
   DESTRUCTIVE_ACTION_ACK,
   GENERATED_SECRET_ACK,
@@ -31,6 +40,7 @@ import { registerOnePasswordResources } from "./mcp-resources.js";
 import {
   DefaultOpScriptRunner,
   type AllowlistedCommand,
+  type OpScriptCommandRunResult,
   type OpScriptRunner,
 } from "./op-runner.js";
 import {
@@ -52,6 +62,7 @@ import {
   DefaultUnrestrictedRunner,
   UnrestrictedApprovalManager,
   type UnrestrictedRunner,
+  type UnrestrictedRunnerStatus,
 } from "./unrestricted-runner.js";
 
 const websiteSchema = z.object({
@@ -85,6 +96,7 @@ const reservedScriptEnvKeys = new Set([
 ]);
 const SCRIPT_RUNNER_SECRET_HINT =
   "When a secret is needed only by a command or local script, prefer op_script_run with envSecretRefs so the secret is injected into the child process and never returned in plaintext.";
+const UNRESTRICTED_SCRIPT_RUNNER_SCOPE = "unrestricted-script-runner-session";
 
 const envSecretRefsSchema = z.record(z.string().min(1), z.string().min(1));
 const passwordReadInputShape = {
@@ -316,21 +328,55 @@ function assertPermissionMutationEnabled(config: ServerConfig): void {
 }
 
 function secretConsumptionGuidance(config: ServerConfig): Record<string, unknown> {
+  const unrestrictedScriptRunner = config.enableUnrestrictedScriptRunner;
   return {
     preferredPath: "op_script_run",
-    reason:
-      "Use this path when the user needs a secret consumed by an allowlisted command, not displayed to the model.",
+    reason: unrestrictedScriptRunner
+      ? "Use this path when the user needs a secret consumed by a local command, not displayed to the model. This server accepts free-form commands after local session approval."
+      : "Use this path when the user needs a secret consumed by an allowlisted command, not displayed to the model.",
     plaintextRevealEnabled: config.enableSecretReveal,
     scriptRunnerEnabled: config.enableScriptRunner,
+    unrestrictedScriptRunnerEnabled: unrestrictedScriptRunner,
     nextStep: config.enableScriptRunner
-      ? "Call op_script_list for the workspaceRoot, then op_script_run with envSecretRefs mapping env var names to op:// references."
+      ? unrestrictedScriptRunner
+        ? "Call op_script_run with workspaceRoot, command, reason, and envSecretRefs mapping env var names to op:// references. If authorizationRequired is returned, open approvalUrl locally once for this MCP process and retry."
+        : "Call op_script_list for the workspaceRoot, then op_script_run with commandId and envSecretRefs mapping env var names to op:// references."
       : "Restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist or --script-runner-allowlist-manifest entries to enable secret injection into scripts.",
+  };
+}
+
+function sessionUnrestrictedRunnerStatus(
+  config: ServerConfig,
+  approvalManager: UnrestrictedApprovalManager,
+  legacyStatus: UnrestrictedRunnerStatus,
+): UnrestrictedRunnerStatus & Record<string, unknown> {
+  if (!config.enableUnrestrictedScriptRunner) {
+    return {
+      mode: "op_unrestricted_run",
+      ...legacyStatus,
+    };
+  }
+
+  return {
+    ...legacyStatus,
+    mode: "op_script_run",
+    enabled: true,
+    configuredRoot: UNRESTRICTED_SCRIPT_RUNNER_SCOPE,
+    configuredRootCount: 1,
+    requireSessionApproval: true,
+    approvalServerAvailable: approvalManager.approvalServerAvailable,
+    approvedRootCount: approvalManager.approvedRootCount,
+    approvalTtlMs: config.unrestrictedRunnerApprovalTtlMs,
+    commandTimeoutMs: config.unrestrictedRunnerCommandTimeoutMs,
+    rememberTtlMs: config.approvalRememberTtlMs,
   };
 }
 
 function scriptRunnerSecretInstruction(config: ServerConfig): string {
   return config.enableScriptRunner
-    ? "Call op_script_list for the workspaceRoot, then op_script_run with envSecretRefs mapping environment variable names to op:// references."
+    ? config.enableUnrestrictedScriptRunner
+      ? "Call op_script_run with workspaceRoot, command, reason, and envSecretRefs mapping environment variable names to op:// references; if authorizationRequired is returned, open approvalUrl locally once for this MCP process and retry."
+      : "Call op_script_list for the workspaceRoot, then op_script_run with commandId and envSecretRefs mapping environment variable names to op:// references."
     : "op_script_run is not available because the script runner is also disabled here; restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist or --script-runner-allowlist-manifest entries to allow no-plaintext secret consumption by scripts.";
 }
 
@@ -360,7 +406,7 @@ function passwordReadDescription(config: ServerConfig): string {
   );
 }
 
-type ScriptOutputState = "returned" | "withheld" | "withheld_ack_missing";
+type ScriptOutputState = "returned" | "withheld" | "skipped_ack_missing";
 
 interface ScriptOutputPolicy {
   requested: boolean;
@@ -390,7 +436,7 @@ function resolveScriptOutputPolicy(
     return {
       requested,
       returned: false,
-      state: "withheld_ack_missing",
+      state: "skipped_ack_missing",
       requiredAcknowledgement: SECRET_REVEAL_ACK,
     };
   }
@@ -399,6 +445,33 @@ function resolveScriptOutputPolicy(
     requested,
     returned: true,
     state: "returned",
+  };
+}
+
+function shouldSkipForMissingOutputAcknowledgement(outputPolicy: ScriptOutputPolicy): boolean {
+  return outputPolicy.state === "skipped_ack_missing";
+}
+
+function outputAcknowledgementRequiredText(): string {
+  return (
+    "Command was not executed because returnOutput=true with secret injection or sensitive output " +
+    `requires acknowledgePlaintext=${SECRET_REVEAL_ACK}. Retry with that acknowledgement to execute the command and return stdout/stderr.`
+  );
+}
+
+function outputAcknowledgementRequiredContent(
+  outputPolicy: ScriptOutputPolicy,
+  extra: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...extra,
+    executionSkipped: true,
+    outputRequested: outputPolicy.requested,
+    outputReturned: false,
+    outputState: outputPolicy.state,
+    ...(outputPolicy.requiredAcknowledgement
+      ? { requiredAcknowledgement: outputPolicy.requiredAcknowledgement }
+      : {}),
   };
 }
 
@@ -520,6 +593,62 @@ function recordAudit(
   });
 }
 
+function instrumentMcpRequests(
+  server: McpServer,
+  config: ServerConfig,
+  auditLogger: AuditLogger,
+): void {
+  if (!config.enableDiagnostics) {
+    return;
+  }
+
+  const originalSetRequestHandler = server.server.setRequestHandler.bind(
+    server.server,
+  );
+  type SetRequestHandler = typeof server.server.setRequestHandler;
+  server.server.setRequestHandler = ((
+    requestSchema: Parameters<SetRequestHandler>[0],
+    handler: Parameters<SetRequestHandler>[1],
+  ) =>
+    originalSetRequestHandler(requestSchema, async (request, extra) => {
+      const metadata = mcpRequestMetadata(request);
+      const startedAt = Date.now();
+      recordDiagnosticAudit(config, auditLogger, "mcp_request_start", "success", {
+        ...metadata,
+        ppid: process.ppid,
+      });
+
+      try {
+        const result = await handler(request, extra);
+        recordDiagnosticAudit(config, auditLogger, "mcp_request", "success", {
+          ...metadata,
+          ppid: process.ppid,
+          durationMs: Date.now() - startedAt,
+        });
+        return result;
+      } catch (error) {
+        recordDiagnosticAudit(config, auditLogger, "mcp_request", "error", {
+          ...metadata,
+          ppid: process.ppid,
+          durationMs: Date.now() - startedAt,
+        }, error);
+        throw error;
+      }
+    })) as SetRequestHandler;
+}
+
+function serviceRuntimeDiagnostics(
+  service: OnePasswordService,
+): RuntimeDiagnostics | undefined {
+  if (
+    "runtimeDiagnostics" in service &&
+    typeof service.runtimeDiagnostics === "function"
+  ) {
+    return service.runtimeDiagnostics();
+  }
+  return undefined;
+}
+
 function resolvePasswordMode(mode: PasswordMode | undefined, password?: string): PasswordMode {
   return mode ?? (password ? "provided" : "random");
 }
@@ -604,7 +733,7 @@ function commandOutputText(result: {
   if (
     result.errorMessage &&
     (outputPolicy.returned ||
-      (!result.sensitiveOutput && outputPolicy.state !== "withheld_ack_missing"))
+      (!result.sensitiveOutput && outputPolicy.state !== "skipped_ack_missing"))
   ) {
     sections.push(result.errorMessage);
   }
@@ -613,8 +742,8 @@ function commandOutputText(result: {
   }
   if (!outputPolicy.returned) {
     sections.push(
-      outputPolicy.state === "withheld_ack_missing"
-        ? `Command stdout/stderr withheld because returnOutput=true with secret injection or sensitive output requires acknowledgePlaintext=${SECRET_REVEAL_ACK}.`
+      outputPolicy.state === "skipped_ack_missing"
+        ? outputAcknowledgementRequiredText()
         : "Command stdout/stderr withheld by default.",
     );
   }
@@ -650,7 +779,7 @@ function scriptRunStructuredContent(
   const includeWithheldErrorMessage =
     result.errorMessage &&
     !result.sensitiveOutput &&
-    outputPolicy.state !== "withheld_ack_missing";
+    outputPolicy.state !== "skipped_ack_missing";
 
   return {
     commandId: result.commandId,
@@ -679,6 +808,42 @@ function scriptRunStructuredContent(
             : {}),
           ...(includeWithheldErrorMessage
             ? { errorMessage: result.errorMessage }
+            : {}),
+        }),
+  };
+}
+
+function unrestrictedScriptRunStructuredContent(
+  result: OpScriptCommandRunResult,
+  outputPolicy: ScriptOutputPolicy,
+): Record<string, unknown> {
+  return {
+    mode: "unrestricted",
+    workspaceRoot: result.workspaceRoot,
+    cwd: result.cwd,
+    authMode: result.authMode,
+    commandHash: sha256Hash(result.command),
+    commandLength: result.command.length,
+    shell: result.shell,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    outputTruncated: result.outputTruncated,
+    durationMs: result.durationMs,
+    refreshedAuth: result.refreshedAuth,
+    sensitiveOutput: result.sensitiveOutput,
+    outputRequested: outputPolicy.requested,
+    outputReturned: outputPolicy.returned,
+    ...(outputPolicy.returned
+      ? {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          errorMessage: result.errorMessage,
+        }
+      : {
+          outputState: outputPolicy.state,
+          ...(outputPolicy.requiredAcknowledgement
+            ? { requiredAcknowledgement: outputPolicy.requiredAcknowledgement }
             : {}),
         }),
   };
@@ -740,13 +905,28 @@ export function createOnePasswordMcpServer(
   scriptRunner: OpScriptRunner = new DefaultOpScriptRunner(config),
   unrestrictedRunner: UnrestrictedRunner = new DefaultUnrestrictedRunner(
     config,
-    new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs),
+    new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs, {
+      storePath: config.approvalRememberStorePath,
+      keyPath: config.approvalRememberKeyPath,
+      rememberTtlMs: config.approvalRememberTtlMs,
+    }),
+  ),
+  approvalManager: UnrestrictedApprovalManager = new UnrestrictedApprovalManager(
+    config.unrestrictedRunnerApprovalTtlMs,
+    {
+      storePath: config.approvalRememberStorePath,
+      keyPath: config.approvalRememberKeyPath,
+      rememberTtlMs: config.approvalRememberTtlMs,
+    },
   ),
 ): McpServer {
+  const capabilities = backendCapabilities(config);
+  const supportedTools = effectiveSupportedTools(config);
   const server = new McpServer({
     name: "mcp-1password",
     version: config.integrationVersion,
   });
+  instrumentMcpRequests(server, config, auditLogger);
 
   registerOnePasswordResources(server, config, service);
   registerOnePasswordPrompts(server);
@@ -760,11 +940,13 @@ export function createOnePasswordMcpServer(
     async () =>
       jsonResult({
         authMode: config.authMode,
+        backend: config.authMode,
         secretRevealEnabled: config.enableSecretReveal,
         writesEnabled: config.enableWrites,
         destructiveActionsEnabled: config.enableDestructiveActions,
         permissionMutationEnabled: config.enablePermissionMutation,
         scriptRunnerEnabled: config.enableScriptRunner,
+        unrestrictedScriptRunnerEnabled: config.enableUnrestrictedScriptRunner,
         scriptRunnerAllowlistManifestCount:
           config.scriptRunnerAllowlistManifestPaths.length,
         unrestrictedRunnerEnabled: config.enableUnrestrictedRunner,
@@ -774,6 +956,7 @@ export function createOnePasswordMcpServer(
         unrestrictedRunnerApprovalTtlMs: config.unrestrictedRunnerApprovalTtlMs,
         unrestrictedRunnerCommandTimeoutMs:
           config.unrestrictedRunnerCommandTimeoutMs,
+        approvalRememberTtlMs: config.approvalRememberTtlMs,
         transport: config.transport,
         httpPath: config.httpPath,
         httpRequireBearer: config.httpRequireBearer,
@@ -781,6 +964,9 @@ export function createOnePasswordMcpServer(
         httpMaxSessions: config.httpMaxSessions,
         httpSessionIdleMs: config.httpSessionIdleMs,
         httpRequestTimeoutMs: config.httpRequestTimeoutMs,
+        diagnosticsEnabled: config.enableDiagnostics,
+        backendCapabilities: capabilities,
+        effectiveSupportedTools: supportedTools,
         secretConsumptionGuidance: secretConsumptionGuidance(config),
         ...SDK_CAPABILITIES,
       }),
@@ -796,19 +982,33 @@ export function createOnePasswordMcpServer(
       const status = scriptRunner.status();
       const unrestrictedStatus = unrestrictedRunner.status();
       return jsonResult({
+        backend: config.authMode,
         ...status,
         secretRevealEnabled: config.enableSecretReveal,
         writesEnabled: config.enableWrites,
         destructiveActionsEnabled: config.enableDestructiveActions,
         permissionMutationEnabled: config.enablePermissionMutation,
         scriptRunnerEnabled: config.enableScriptRunner,
+        unrestrictedScriptRunnerEnabled: config.enableUnrestrictedScriptRunner,
         scriptRunnerAllowlistCount:
           status.loadedAllowlistCount ?? config.scriptRunnerAllowlistPaths.length,
         scriptRunnerConfiguredAllowlistPathCount:
           config.scriptRunnerAllowlistPaths.length,
         scriptRunnerAllowlistManifestCount:
           config.scriptRunnerAllowlistManifestPaths.length,
-        unrestrictedRunner: unrestrictedStatus,
+        approvalRememberTtlMs: config.approvalRememberTtlMs,
+        unrestrictedRunner: sessionUnrestrictedRunnerStatus(
+          config,
+          approvalManager,
+          unrestrictedStatus,
+        ),
+        diagnostics: {
+          backend: config.authMode,
+          enabled: config.enableDiagnostics,
+          pid: process.pid,
+          ppid: process.ppid,
+          ...serviceRuntimeDiagnostics(service),
+        },
         secretConsumptionGuidance: secretConsumptionGuidance(config),
       });
     },
@@ -826,6 +1026,15 @@ export function createOnePasswordMcpServer(
       },
       async ({ workspaceRoot }) => {
         assertScriptRunnerEnabled(config);
+        if (config.enableUnrestrictedScriptRunner) {
+          return jsonResult({
+            unrestrictedScriptRunner: true,
+            workspaceRoot,
+            commands: [],
+            message:
+              "Unrestricted script runner is enabled; startup allowlists are ignored and op_script_run accepts a free-form command after one local approval per MCP process.",
+          });
+        }
         const allowlist = await scriptRunner.list(workspaceRoot);
         return jsonResult({
           path: allowlist.path,
@@ -847,6 +1056,24 @@ export function createOnePasswordMcpServer(
       },
       async ({ reason }) => {
         assertScriptRunnerEnabled(config);
+        if (config.enableUnrestrictedScriptRunner) {
+          const result = {
+            reloaded: false,
+            ignored: true,
+            unrestrictedScriptRunner: true,
+            configuredAllowlistPathCount: config.scriptRunnerAllowlistPaths.length,
+            configuredAllowlistManifestCount:
+              config.scriptRunnerAllowlistManifestPaths.length,
+            previousAllowlistCount: 0,
+            allowlistCount: 0,
+            commandCount: 0,
+          };
+          recordAudit(auditLogger, "op_script_reload_allowlists", "success", {
+            reason,
+            ...result,
+          });
+          return jsonResult(result);
+        }
 
         try {
           const reload = scriptRunner.reload();
@@ -884,10 +1111,11 @@ export function createOnePasswordMcpServer(
       "op_script_run",
       {
         description:
-          `Run one currently loaded startup-configured allowlisted script with 1Password CLI auth injected by the MCP process. ${SCRIPT_RUNNER_SECRET_HINT} Use this instead of password_read reveal or secret_reveal when the secret only needs to be passed to a script. No free-form shell commands are accepted. If returnOutput=true is requested for secret-injected or sensitive output without plaintext acknowledgement, the command still runs once and output is withheld.`,
+          `Run one script with 1Password CLI auth injected by the MCP process. In normal mode this runs a startup-configured allowlisted commandId. When --enable-unrestricted-script-runner=true is set, startup allowlists are ignored and this accepts a free-form command after one local browser approval per MCP process. ${SCRIPT_RUNNER_SECRET_HINT} Use this instead of password_read reveal or secret_reveal when the secret only needs to be passed to a script. If returnOutput=true is requested for secret-injected or sensitive output without plaintext acknowledgement, execution is skipped and the required acknowledgement is returned.`,
         inputSchema: {
           workspaceRoot: z.string().min(1),
-          commandId: z.string().min(1),
+          commandId: z.string().min(1).optional(),
+          command: z.string().min(1).optional(),
           reason: z.string().min(3),
           envSecretRefs: envSecretRefsSchema.optional(),
           returnOutput: z.boolean().optional(),
@@ -897,6 +1125,7 @@ export function createOnePasswordMcpServer(
       async ({
         workspaceRoot,
         commandId,
+        command,
         reason,
         envSecretRefs,
         returnOutput,
@@ -912,12 +1141,163 @@ export function createOnePasswordMcpServer(
           envSecretReferences = summarizeEnvSecretRefs(validatedEnvSecretRefs);
           injectedSecretEnvVars = envSecretReferences.map((entry) => entry.envVar);
 
-          const command = await getAllowlistedCommand(scriptRunner, workspaceRoot, commandId);
+          if (config.enableUnrestrictedScriptRunner) {
+            if (!command) {
+              throw new Error(
+                "command is required when unrestricted script runner mode is enabled.",
+              );
+            }
+
+            if (!approvalManager.isApproved(UNRESTRICTED_SCRIPT_RUNNER_SCOPE)) {
+              const authorization = approvalManager.createAuthorizationRequest(
+                workspaceRoot,
+                UNRESTRICTED_SCRIPT_RUNNER_SCOPE,
+              );
+              recordAudit(
+                auditLogger,
+                "op_script_run_authorization_required",
+                "success",
+                {
+                  workspaceRoot,
+                  configuredRoot: UNRESTRICTED_SCRIPT_RUNNER_SCOPE,
+                  commandHash: sha256Hash(command),
+                  commandLength: command.length,
+                  reason,
+                  requiredAcknowledgement: UNRESTRICTED_RUNNER_ACK,
+                  envSecretRefCount: envSecretReferences.length,
+                  injectedSecretEnvVars,
+                  envSecretReferences,
+                },
+              );
+              return jsonResult(authorization);
+            }
+
+            const outputPolicy = resolveScriptOutputPolicy(
+              returnOutput,
+              true,
+              acknowledgePlaintext,
+            );
+            if (shouldSkipForMissingOutputAcknowledgement(outputPolicy)) {
+              recordAudit(auditLogger, "op_script_run_output_ack_required", "success", {
+                mode: "unrestricted",
+                workspaceRoot,
+                commandHash: sha256Hash(command),
+                commandLength: command.length,
+                reason,
+                sensitiveOutput: true,
+                outputRequested: outputPolicy.requested,
+                outputReturned: outputPolicy.returned,
+                outputState: outputPolicy.state,
+                requiredAcknowledgement: outputPolicy.requiredAcknowledgement,
+                envSecretRefCount: envSecretReferences.length,
+                injectedSecretEnvVars,
+                envSecretReferences,
+              });
+
+              return textResult(
+                outputAcknowledgementRequiredText(),
+                outputAcknowledgementRequiredContent(outputPolicy, {
+                  mode: "unrestricted",
+                  workspaceRoot,
+                  commandHash: sha256Hash(command),
+                  commandLength: command.length,
+                  sensitiveOutput: true,
+                  envSecretRefCount: envSecretReferences.length,
+                  injectedSecretEnvVars,
+                }),
+              );
+            }
+            const { extraEnv, secretRedactionValues } = await resolveEnvSecretRefs(
+              service,
+              validatedEnvSecretRefs,
+            );
+            const result = await scriptRunner.runCommand(workspaceRoot, command, {
+              extraEnv,
+              secretRedactionValues,
+            });
+            const outcome =
+              result.exitCode === 0 && !result.timedOut ? "success" : "error";
+            recordAudit(auditLogger, "op_script_run", outcome, {
+              mode: "unrestricted",
+              workspaceRoot: result.workspaceRoot,
+              cwd: result.cwd,
+              commandHash: sha256Hash(command),
+              commandLength: command.length,
+              shell: result.shell,
+              authMode: result.authMode,
+              reason,
+              durationMs: result.durationMs,
+              exitCode: result.exitCode,
+              signal: result.signal,
+              timedOut: result.timedOut,
+              outputTruncated: result.outputTruncated,
+              refreshedAuth: result.refreshedAuth,
+              sensitiveOutput: result.sensitiveOutput,
+              outputRequested: outputPolicy.requested,
+              outputReturned: outputPolicy.returned,
+              outputState: outputPolicy.state,
+              envSecretRefCount: envSecretReferences.length,
+              injectedSecretEnvVars,
+              envSecretReferences,
+              ...(outputPolicy.requiredAcknowledgement
+                ? { requiredAcknowledgement: outputPolicy.requiredAcknowledgement }
+                : {}),
+            }, result.errorMessage);
+
+            return {
+              ...textResult(
+                commandOutputText(result, outputPolicy),
+                {
+                  ...unrestrictedScriptRunStructuredContent(result, outputPolicy),
+                  envSecretRefCount: envSecretReferences.length,
+                  injectedSecretEnvVars,
+                },
+              ),
+              isError: outcome === "error",
+            };
+          }
+
+          if (!commandId) {
+            throw new Error("commandId is required unless unrestricted script runner mode is enabled.");
+          }
+          const allowlistedCommand = await getAllowlistedCommand(
+            scriptRunner,
+            workspaceRoot,
+            commandId,
+          );
           const outputPolicy = resolveScriptOutputPolicy(
             returnOutput,
-            envSecretReferences.length > 0 || command?.sensitiveOutput === true,
+            envSecretReferences.length > 0 || allowlistedCommand.sensitiveOutput === true,
             acknowledgePlaintext,
           );
+          if (shouldSkipForMissingOutputAcknowledgement(outputPolicy)) {
+            recordAudit(auditLogger, "op_script_run_output_ack_required", "success", {
+              workspaceRoot,
+              commandId,
+              command: allowlistedCommand.command,
+              args: allowlistedCommand.args,
+              reason,
+              sensitiveOutput: allowlistedCommand.sensitiveOutput,
+              outputRequested: outputPolicy.requested,
+              outputReturned: outputPolicy.returned,
+              outputState: outputPolicy.state,
+              requiredAcknowledgement: outputPolicy.requiredAcknowledgement,
+              envSecretRefCount: envSecretReferences.length,
+              injectedSecretEnvVars,
+              envSecretReferences,
+            });
+
+            return textResult(
+              outputAcknowledgementRequiredText(),
+              outputAcknowledgementRequiredContent(outputPolicy, {
+                workspaceRoot,
+                commandId,
+                sensitiveOutput: allowlistedCommand.sensitiveOutput,
+                envSecretRefCount: envSecretReferences.length,
+                injectedSecretEnvVars,
+              }),
+            );
+          }
 
           const { extraEnv, secretRedactionValues } = await resolveEnvSecretRefs(
             service,
@@ -975,6 +1355,8 @@ export function createOnePasswordMcpServer(
             {
               workspaceRoot,
               commandId,
+              commandHash: command ? sha256Hash(command) : undefined,
+              commandLength: command?.length,
               reason,
               envSecretRefCount: envSecretReferences.length,
               injectedSecretEnvVars,
@@ -1009,7 +1391,7 @@ export function createOnePasswordMcpServer(
       "op_unrestricted_run",
       {
         description:
-          "Run a free-form local shell command from a startup-configured unrestricted runner root after explicit local session approval. This is intentionally dangerous: the configured path is an approval scope, not an operating-system sandbox, and commands are not allowlisted. 1Password secrets are not injected; prefer op_script_run for secret-consuming commands. If returnOutput=true is requested without plaintext acknowledgement, the command still runs once and stdout/stderr is withheld.",
+          "Run a free-form local shell command from a startup-configured unrestricted runner root after explicit local session approval. This is intentionally dangerous: the configured path is an approval scope, not an operating-system sandbox, and commands are not allowlisted. 1Password secrets are not injected; prefer op_script_run for secret-consuming commands. If returnOutput=true is requested without plaintext acknowledgement, execution is skipped and the required acknowledgement is returned.",
         inputSchema: {
           workspaceRoot: z.string().min(1),
           command: z.string().min(1),
@@ -1051,6 +1433,29 @@ export function createOnePasswordMcpServer(
             true,
             acknowledgePlaintext,
           );
+          if (shouldSkipForMissingOutputAcknowledgement(outputPolicy)) {
+            recordAudit(auditLogger, "op_unrestricted_run_output_ack_required", "success", {
+              workspaceRoot,
+              commandHash: sha256Hash(command),
+              commandLength: command.length,
+              reason,
+              sensitiveOutput: true,
+              outputRequested: outputPolicy.requested,
+              outputReturned: outputPolicy.returned,
+              outputState: outputPolicy.state,
+              requiredAcknowledgement: outputPolicy.requiredAcknowledgement,
+            });
+
+            return textResult(
+              outputAcknowledgementRequiredText(),
+              outputAcknowledgementRequiredContent(outputPolicy, {
+                workspaceRoot,
+                commandHash: sha256Hash(command),
+                commandLength: command.length,
+                sensitiveOutput: true,
+              }),
+            );
+          }
           const result = await unrestrictedRunner.run(workspaceRoot, command);
           const outcome =
             result.exitCode === 0 && !result.timedOut ? "success" : "error";
@@ -1480,7 +1885,7 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  if (config.enableWrites) {
+  if (config.enableWrites && capabilities.vaultMutation) {
     server.registerTool(
       "vault_create",
     {
@@ -1531,7 +1936,7 @@ export function createOnePasswordMcpServer(
 
   }
 
-  if (config.enableDestructiveActions) {
+  if (config.enableDestructiveActions && capabilities.vaultDestructive) {
     server.registerTool(
       "vault_delete",
     {
@@ -1555,7 +1960,8 @@ export function createOnePasswordMcpServer(
     );
   }
 
-  server.registerTool(
+  if (capabilities.permissionRead) {
+    server.registerTool(
     "group_get",
     {
       description:
@@ -1573,7 +1979,7 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
+    server.registerTool(
     "vault_permissions_get",
     {
       description:
@@ -1589,9 +1995,10 @@ export function createOnePasswordMcpServer(
         accessors: redactVault(vault).access ?? [],
       });
     },
-  );
+    );
+  }
 
-  if (config.enablePermissionMutation) {
+  if (config.enablePermissionMutation && capabilities.permissionMutation) {
     server.registerTool(
       "vault_permissions_grant_group",
     {
@@ -1876,7 +2283,8 @@ export function createOnePasswordMcpServer(
   }
 
   if (config.enableDestructiveActions) {
-    server.registerTool(
+    if (capabilities.itemArchive) {
+      server.registerTool(
       "item_archive",
     {
       description: "Archive an item. Requires a reason and destructive-action acknowledgement.",
@@ -1903,9 +2311,11 @@ export function createOnePasswordMcpServer(
         throw error;
       }
     },
-  );
+      );
+    }
 
-    server.registerTool(
+    if (capabilities.itemDelete) {
+      server.registerTool(
       "item_delete",
     {
       description: "Delete an item. Requires a reason and destructive-action acknowledgement.",
@@ -1932,10 +2342,12 @@ export function createOnePasswordMcpServer(
         throw error;
       }
     },
-    );
+      );
+    }
   }
 
-  server.registerTool(
+  if (capabilities.environments) {
+    server.registerTool(
     "environment_get_variables",
     {
       description:
@@ -1961,7 +2373,7 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
+    server.registerTool(
     "environment_get_variable",
     {
       description:
@@ -1982,7 +2394,7 @@ export function createOnePasswordMcpServer(
     },
   );
 
-  server.registerTool(
+    server.registerTool(
     "environment_reveal_variable",
     {
       description: plaintextRevealDescription(
@@ -2027,7 +2439,8 @@ export function createOnePasswordMcpServer(
         throw error;
       }
     },
-  );
+    );
+  }
 
   server.registerTool(
     "secret_reveal",

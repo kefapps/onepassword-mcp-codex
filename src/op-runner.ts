@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { constants, readFileSync, realpathSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -29,6 +29,7 @@ export interface AllowlistedCommand {
 export interface ScriptAllowlist {
   path: string;
   workspaceRoot: string;
+  workspaceRootMatch?: "exact" | "prefix";
   commands: AllowlistedCommand[];
 }
 
@@ -62,6 +63,11 @@ interface OpCliEnvironment {
   refreshedAuth: boolean;
 }
 
+interface ResolvedScriptAllowlist {
+  allowlist: ScriptAllowlist;
+  requestedWorkspaceRoot: string;
+}
+
 export interface OpSessionStatus {
   enabled: boolean;
   authMode: ResolvedOpCliAuthMode;
@@ -87,6 +93,17 @@ export interface OpScriptRunResult extends ProcessRunResult {
   refreshedAuth: boolean;
 }
 
+export interface OpScriptCommandRunResult extends ProcessRunResult {
+  workspaceRoot: string;
+  cwd: string;
+  command: string;
+  shell: string;
+  shellArgs: string[];
+  sensitiveOutput: true;
+  authMode: ResolvedOpCliAuthMode;
+  refreshedAuth: boolean;
+}
+
 export interface OpScriptRunOptions {
   extraEnv?: Record<string, string>;
   secretRedactionValues?: string[];
@@ -105,6 +122,11 @@ export interface OpScriptRunner {
     commandId: string,
     options?: OpScriptRunOptions,
   ): Promise<OpScriptRunResult>;
+  runCommand(
+    workspaceRoot: string,
+    command: string,
+    options?: OpScriptRunOptions,
+  ): Promise<OpScriptCommandRunResult>;
   reload(): ScriptAllowlistReloadResult;
   status(): OpSessionStatus;
   reset(): void;
@@ -123,6 +145,7 @@ const allowlistSchema = z.object({
   version: z.literal(1),
   workspaceRoot: z.string().min(1).optional(),
   workspaceRoots: z.array(z.string().min(1)).optional(),
+  workspaceRootPrefixes: z.array(z.string().min(1)).optional(),
   commands: z.record(commandSchema),
 });
 
@@ -150,6 +173,24 @@ function isPathInside(parentPath: string, childPath: string): boolean {
       pathRelative !== ".." &&
       !isAbsolute(pathRelative))
   );
+}
+
+function isWorkspaceRootPrefixMatch(prefixPath: string, workspaceRoot: string): boolean {
+  return (
+    isPathInside(prefixPath, workspaceRoot) ||
+    workspaceRoot.startsWith(`${prefixPath}-`)
+  );
+}
+
+function matchesWorkspaceRoot(
+  allowlist: ScriptAllowlist,
+  workspaceRoot: string,
+): boolean {
+  if (allowlist.workspaceRootMatch === "prefix") {
+    return isWorkspaceRootPrefixMatch(allowlist.workspaceRoot, workspaceRoot);
+  }
+
+  return isPathInside(allowlist.workspaceRoot, workspaceRoot);
 }
 
 function escapeRegExp(value: string): string {
@@ -300,6 +341,37 @@ function createScriptEnvironment(
   return prependPathEntries(env, isAbsolute(opCliPath) ? [dirname(opCliPath)] : []);
 }
 
+function shellCommand(command: string): { shell: string; shellArgs: string[] } {
+  if (process.platform === "win32") {
+    return {
+      shell: process.env.ComSpec ?? "cmd.exe",
+      shellArgs: ["/d", "/s", "/c", command],
+    };
+  }
+
+  return {
+    shell: "/bin/sh",
+    shellArgs: ["-c", command],
+  };
+}
+
+function terminateChildProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH") {
+        child.kill(signal);
+      }
+      return;
+    }
+  }
+
+  child.kill(signal);
+}
+
 export class NodeProcessRunner implements ProcessRunner {
   public run(
     command: string,
@@ -325,23 +397,25 @@ export class NodeProcessRunner implements ProcessRunner {
       const child = spawn(command, args, {
         cwd: options.cwd,
         env: options.env,
+        detached: process.platform !== "win32",
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
       });
 
       const timeout = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
+        terminateChildProcessTree(child, "SIGTERM");
         forceKillTimeout = setTimeout(() => {
           if (settled) {
             return;
           }
-          child.kill("SIGKILL");
+          terminateChildProcessTree(child, "SIGKILL");
           forceSettleTimeout = setTimeout(() => {
             settle({
               exitCode: null,
               signal: "SIGKILL",
-              errorMessage: "Process timed out and did not close after SIGKILL.",
+              errorMessage:
+                "Process timed out and did not close after process-group SIGKILL.",
             });
           }, forceKillGraceMs(options.timeoutMs));
         }, forceKillGraceMs(options.timeoutMs));
@@ -364,7 +438,7 @@ export class NodeProcessRunner implements ProcessRunner {
           clearTimeout(forceSettleTimeout);
         }
         outputTruncated = outputTruncated || outputState.truncated;
-        resolveResult({
+        const output = {
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: Buffer.concat(stderrChunks).toString("utf8"),
           exitCode: result.exitCode,
@@ -373,7 +447,10 @@ export class NodeProcessRunner implements ProcessRunner {
           outputTruncated,
           durationMs: Date.now() - startedAt,
           errorMessage: result.errorMessage,
-        });
+        };
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        resolveResult(output);
       };
 
       child.stdout?.on("data", (data: Buffer) => {
@@ -652,14 +729,21 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
 
   private loadAllowlists(): ScriptAllowlist[] {
     return (
-      this.config.enableScriptRunner ? loadConfiguredScriptAllowlists(this.config) : []
+      this.config.enableScriptRunner && !this.config.enableUnrestrictedScriptRunner
+        ? loadConfiguredScriptAllowlists(this.config)
+        : []
     ).sort((left, right) => right.workspaceRoot.length - left.workspaceRoot.length);
   }
 
   public async list(workspaceRoot: string): Promise<ScriptAllowlist> {
+    const resolved = await this.resolveAllowlist(workspaceRoot);
+    return resolved.allowlist;
+  }
+
+  private async resolveAllowlist(workspaceRoot: string): Promise<ResolvedScriptAllowlist> {
     const resolvedWorkspaceRoot = await realpath(workspaceRoot);
     const allowlist = this.allowlistsByWorkspaceRoot.find((candidate) =>
-      isPathInside(candidate.workspaceRoot, resolvedWorkspaceRoot),
+      matchesWorkspaceRoot(candidate, resolvedWorkspaceRoot),
     );
     if (!allowlist) {
       throw new Error(
@@ -667,7 +751,10 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
       );
     }
 
-    return allowlist;
+    return {
+      allowlist,
+      requestedWorkspaceRoot: resolvedWorkspaceRoot,
+    };
   }
 
   public async run(
@@ -675,13 +762,13 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     commandId: string,
     options: OpScriptRunOptions = {},
   ): Promise<OpScriptRunResult> {
-    const allowlist = await this.list(workspaceRoot);
+    const { allowlist, requestedWorkspaceRoot } = await this.resolveAllowlist(workspaceRoot);
     const command = allowlist.commands.find((candidate) => candidate.id === commandId);
     if (!command) {
       throw new Error(`Allowlisted command ${commandId} not found.`);
     }
 
-    const cwd = await resolveWorkspacePath(allowlist.workspaceRoot, command.cwd);
+    const cwd = await resolveWorkspacePath(requestedWorkspaceRoot, command.cwd);
     await validateCommandExecutable(command.command);
 
     const auth = await this.sessionManager.getEnvironment();
@@ -714,7 +801,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
       stderr,
       errorMessage,
       commandId,
-      workspaceRoot: allowlist.workspaceRoot,
+      workspaceRoot: requestedWorkspaceRoot,
       cwd,
       command: command.command,
       args: command.args,
@@ -723,12 +810,65 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
       refreshedAuth: auth.refreshedAuth,
     };
   }
+
+  public async runCommand(
+    workspaceRoot: string,
+    command: string,
+    options: OpScriptRunOptions = {},
+  ): Promise<OpScriptCommandRunResult> {
+    if (!this.config.enableUnrestrictedScriptRunner) {
+      throw new Error(
+        "Unrestricted script runner is disabled. Restart the server with --enable-unrestricted-script-runner=true to allow free-form op_script_run commands.",
+      );
+    }
+
+    const resolvedWorkspaceRoot = await realpath(workspaceRoot);
+    const { shell, shellArgs } = shellCommand(command);
+    const auth = await this.sessionManager.getEnvironment();
+    const env = createScriptEnvironment(
+      {
+        ...auth.env,
+        ...options.extraEnv,
+      },
+      this.config.opCliPath,
+    );
+    const result = await this.processRunner.run(shell, shellArgs, {
+      cwd: resolvedWorkspaceRoot,
+      env,
+      timeoutMs: this.config.unrestrictedRunnerCommandTimeoutMs,
+      maxOutputBytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+    });
+    const stdout = this.sessionManager.redact(result.stdout, options.secretRedactionValues);
+    const stderr = this.sessionManager.redact(result.stderr, options.secretRedactionValues);
+    const errorMessage = result.errorMessage
+      ? this.sessionManager.redact(result.errorMessage, options.secretRedactionValues)
+      : undefined;
+
+    if (isDeterministicOpAuthFailure(result)) {
+      this.sessionManager.markManualSessionInvalid();
+    }
+
+    return {
+      ...result,
+      stdout,
+      stderr,
+      errorMessage,
+      workspaceRoot: resolvedWorkspaceRoot,
+      cwd: resolvedWorkspaceRoot,
+      command,
+      shell,
+      shellArgs,
+      sensitiveOutput: true,
+      authMode: auth.mode,
+      refreshedAuth: auth.refreshedAuth,
+    };
+  }
 }
 
-function resolveWorkspaceRootsFromParsed(
+function resolveWorkspaceRootEntriesFromParsed(
   allowlistPath: string,
   parsed: z.infer<typeof allowlistSchema>,
-): string[] {
+): Array<{ workspaceRoot: string; workspaceRootMatch?: "exact" | "prefix" }> {
   const entries = parsed.workspaceRoots?.length
     ? parsed.workspaceRoots
     : parsed.workspaceRoot
@@ -736,17 +876,28 @@ function resolveWorkspaceRootsFromParsed(
       : ["."];
 
   const base = dirname(allowlistPath);
-  return entries.map((root) => realpathSync(resolve(base, root)));
+  return [
+    ...entries.map((root) => ({
+      workspaceRoot: realpathSync(resolve(base, root)),
+      workspaceRootMatch: "exact" as const,
+    })),
+    ...(parsed.workspaceRootPrefixes ?? []).map((rootPrefix) => ({
+      workspaceRoot: realpathSync(resolve(base, rootPrefix)),
+      workspaceRootMatch: "prefix" as const,
+    })),
+  ];
 }
 
 function scriptAllowlistFromParsed(
   allowlistPath: string,
   workspaceRoot: string,
+  workspaceRootMatch: "exact" | "prefix" | undefined,
   parsed: z.infer<typeof allowlistSchema>,
 ): ScriptAllowlist {
   return {
     path: allowlistPath,
     workspaceRoot,
+    workspaceRootMatch,
     commands: Object.entries(parsed.commands).map(([id, command]) => ({
       id,
       description: command.description,
@@ -789,17 +940,24 @@ export function loadConfiguredScriptAllowlists(
   return resolvedAllowlistPaths.flatMap((resolvedAllowlistPath) => {
     const raw = readFileSync(resolvedAllowlistPath, "utf8");
     const parsed = allowlistSchema.parse(JSON.parse(raw));
-    const workspaceRoots = resolveWorkspaceRootsFromParsed(
+    const workspaceRootEntries = resolveWorkspaceRootEntriesFromParsed(
       resolvedAllowlistPath,
       parsed,
     );
 
-    return workspaceRoots.flatMap((workspaceRoot) => {
+    return workspaceRootEntries.flatMap(({ workspaceRoot, workspaceRootMatch }) => {
       if (resolvedAllowedRoots.length > 0) {
         assertWorkspaceRootAllowed(workspaceRoot, resolvedAllowedRoots);
       }
 
-      return [scriptAllowlistFromParsed(resolvedAllowlistPath, workspaceRoot, parsed)];
+      return [
+        scriptAllowlistFromParsed(
+          resolvedAllowlistPath,
+          workspaceRoot,
+          workspaceRootMatch,
+          parsed,
+        ),
+      ];
     });
   });
 }

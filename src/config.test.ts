@@ -7,6 +7,9 @@ const ENV_KEYS = [
   "OP_MCP_ACCOUNT",
   "OP_SERVICE_ACCOUNT_TOKEN",
   "OP_MCP_SERVICE_ACCOUNT_TOKEN",
+  "OP_CONNECT_HOST",
+  "OP_CONNECT_TOKEN",
+  "OP_MCP_CONNECT_TIMEOUT_MS",
   "OP_MCP_HTTP_BEARER_TOKEN",
   "OP_MCP_TRANSPORT",
   "OP_MCP_HTTP_HOST",
@@ -18,6 +21,7 @@ const ENV_KEYS = [
   "OP_MCP_HTTP_SESSION_IDLE_MS",
   "OP_MCP_HTTP_REQUEST_TIMEOUT_MS",
   "OP_MCP_SCRIPT_RUNNER_ALLOWLIST_MANIFESTS",
+  "OP_MCP_ENABLE_UNRESTRICTED_SCRIPT_RUNNER",
   "OP_MCP_ENABLE_UNRESTRICTED_RUNNER",
   "OP_MCP_UNRESTRICTED_RUNNER_ROOTS",
   "OP_MCP_UNRESTRICTED_RUNNER_REQUIRE_SESSION_APPROVAL",
@@ -25,7 +29,11 @@ const ENV_KEYS = [
   "OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_PORT",
   "OP_MCP_UNRESTRICTED_RUNNER_APPROVAL_TTL_MS",
   "OP_MCP_UNRESTRICTED_RUNNER_COMMAND_TIMEOUT_MS",
+  "OP_MCP_APPROVAL_REMEMBER_STORE_PATH",
+  "OP_MCP_APPROVAL_REMEMBER_KEY_PATH",
+  "OP_MCP_APPROVAL_REMEMBER_TTL_MS",
   "OP_MCP_ACKNOWLEDGE_UNRESTRICTED_RUNNER",
+  "OP_MCP_DIAGNOSTICS",
 ] as const;
 
 function withCleanAuthEnv(callback: () => void): void {
@@ -56,6 +64,7 @@ test("parseConfig keeps write and script runner gates disabled by default", () =
   assert.equal(config.enableDestructiveActions, false);
   assert.equal(config.enablePermissionMutation, false);
   assert.equal(config.enableScriptRunner, false);
+  assert.equal(config.enableUnrestrictedScriptRunner, false);
   assert.deepEqual(config.scriptRunnerRoots, []);
   assert.deepEqual(config.scriptRunnerAllowlistPaths, []);
   assert.deepEqual(config.scriptRunnerAllowlistManifestPaths, []);
@@ -66,6 +75,9 @@ test("parseConfig keeps write and script runner gates disabled by default", () =
   assert.equal(config.unrestrictedRunnerApprovalPort, 0);
   assert.equal(config.unrestrictedRunnerApprovalTtlMs, 12 * 60 * 60_000);
   assert.equal(config.unrestrictedRunnerCommandTimeoutMs, 600_000);
+  assert.match(config.approvalRememberStorePath, /approval-grants\.enc\.json$/);
+  assert.match(config.approvalRememberKeyPath, /approval-grants\.key$/);
+  assert.equal(config.approvalRememberTtlMs, 24 * 60 * 60_000);
   assert.equal(config.transport, "stdio");
   assert.equal(config.httpHost, "127.0.0.1");
   assert.equal(config.httpPort, 17337);
@@ -75,6 +87,68 @@ test("parseConfig keeps write and script runner gates disabled by default", () =
   assert.equal(config.httpMaxSessions, 64);
   assert.equal(config.httpSessionIdleMs, 15 * 60_000);
   assert.equal(config.httpRequestTimeoutMs, 30_000);
+  assert.equal(config.enableDiagnostics, false);
+});
+
+test("parseConfig enables diagnostics from flag", () => {
+  const config = parseConfig(
+    ["--account", "TestAccount", "--diagnostics=true"],
+    "0.1.0",
+  );
+
+  assert.equal(config.enableDiagnostics, true);
+});
+
+test("parseConfig accepts local Connect auth mode", () => {
+  withCleanAuthEnv(() => {
+    process.env.OP_CONNECT_TOKEN = "connect-token";
+
+    const config = parseConfig(["--auth-mode=connect"], "0.1.0");
+
+    assert.equal(config.authMode, "connect");
+    assert.equal(config.connectHost, "http://127.0.0.1:8080");
+    assert.equal(config.connectToken, "connect-token");
+    assert.equal(config.connectTimeoutMs, 30_000);
+    assert.equal(config.account, undefined);
+    assert.equal(config.serviceAccountToken, undefined);
+  });
+});
+
+test("parseConfig rejects Connect hosts outside localhost", () => {
+  withCleanAuthEnv(() => {
+    assert.throws(
+      () =>
+        parseConfig(
+          [
+            "--auth-mode=connect",
+            "--connect-token=connect-token",
+            "--connect-host=https://connect.example.com",
+          ],
+          "0.1.0",
+        ),
+      /Connect host must use localhost/,
+    );
+  });
+});
+
+test("parseConfig accepts unrestricted script runner without allowlists", () => {
+  const config = parseConfig(
+    [
+      "--account",
+      "TestAccount",
+      "--enable-unrestricted-script-runner=true",
+      "--op-cli-path=/usr/local/bin/op",
+      "--op-cli-auth-mode=desktop",
+    ],
+    "0.1.0",
+  );
+
+  assert.equal(config.enableScriptRunner, true);
+  assert.equal(config.enableUnrestrictedScriptRunner, true);
+  assert.deepEqual(config.scriptRunnerRoots, []);
+  assert.deepEqual(config.scriptRunnerAllowlistPaths, []);
+  assert.deepEqual(config.scriptRunnerAllowlistManifestPaths, []);
+  assert.equal(config.unrestrictedRunnerRequireSessionApproval, true);
 });
 
 test("parseConfig requires configured allowlists when script runner is enabled", () => {
@@ -232,6 +306,9 @@ test("parseConfig accepts unrestricted runner configuration with session approva
       "--unrestricted-runner-approval-port=19000",
       "--unrestricted-runner-approval-ttl-ms=3600000",
       "--unrestricted-runner-command-timeout-ms=120000",
+      "--approval-remember-store-path=/tmp/approval-grants.enc.json",
+      "--approval-remember-key-path=/tmp/approval-grants.key",
+      "--approval-remember-ttl-ms=7200000",
     ],
     "0.1.0",
   );
@@ -243,6 +320,9 @@ test("parseConfig accepts unrestricted runner configuration with session approva
   assert.equal(config.unrestrictedRunnerApprovalPort, 19000);
   assert.equal(config.unrestrictedRunnerApprovalTtlMs, 3_600_000);
   assert.equal(config.unrestrictedRunnerCommandTimeoutMs, 120_000);
+  assert.equal(config.approvalRememberStorePath, "/tmp/approval-grants.enc.json");
+  assert.equal(config.approvalRememberKeyPath, "/tmp/approval-grants.key");
+  assert.equal(config.approvalRememberTtlMs, 7_200_000);
 });
 
 test("parseConfig validates unrestricted runner roots and approval bypass", () => {

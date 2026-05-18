@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { FileAuditLogger } from "./audit.js";
 import { HelpError, parseConfig } from "./config.js";
+import { ConnectOnePasswordService } from "./connect-service.js";
+import { processMetadata, recordDiagnosticAudit } from "./diagnostics.js";
 import { startOnePasswordHttpServer } from "./http-server.js";
+import { installStdioShutdownHandler } from "./lifecycle.js";
 import { DefaultOpScriptRunner } from "./op-runner.js";
 import { createOnePasswordMcpServer } from "./server.js";
 import { SdkOnePasswordService } from "./service.js";
@@ -28,11 +31,23 @@ function readPackageVersion(): string {
 async function main(): Promise<void> {
   const config = parseConfig(process.argv.slice(2), readPackageVersion());
   const auditLogger = new FileAuditLogger(config.auditLogPath);
-  const service = new SdkOnePasswordService(config);
-  const scriptRunner = new DefaultOpScriptRunner(config);
+  recordDiagnosticAudit(config, auditLogger, "server_start", "success", {
+    ...processMetadata(config),
+    argvCount: process.argv.length,
+  });
+  const service =
+    config.authMode === "connect"
+      ? new ConnectOnePasswordService(config, undefined, auditLogger)
+      : new SdkOnePasswordService(config, undefined, auditLogger);
   const unrestrictedApprovalManager = new UnrestrictedApprovalManager(
     config.unrestrictedRunnerApprovalTtlMs,
+    {
+      storePath: config.approvalRememberStorePath,
+      keyPath: config.approvalRememberKeyPath,
+      rememberTtlMs: config.approvalRememberTtlMs,
+    },
   );
+  const scriptRunner = new DefaultOpScriptRunner(config);
   const unrestrictedApprovalServer = await startUnrestrictedApprovalServer(
     config,
     unrestrictedApprovalManager,
@@ -44,7 +59,7 @@ async function main(): Promise<void> {
   );
 
   console.error(
-    `[mcp-1password] transport=${config.transport} auth=${config.authMode} reveal=${config.enableSecretReveal} writes=${config.enableWrites} destructive=${config.enableDestructiveActions} permissions=${config.enablePermissionMutation} scriptRunner=${config.enableScriptRunner} scriptAllowlists=${config.scriptRunnerAllowlistPaths.length} scriptAllowlistManifests=${config.scriptRunnerAllowlistManifestPaths.length} unrestrictedRunner=${config.enableUnrestrictedRunner} unrestrictedRoots=${config.unrestrictedRunnerRoots.length} unrestrictedApproval=${config.unrestrictedRunnerRequireSessionApproval} opAuth=${config.opCliAuthMode} audit=${config.auditLogPath}`,
+    `[mcp-1password] transport=${config.transport} auth=${config.authMode} connectHost=${config.connectHost ?? "none"} reveal=${config.enableSecretReveal} writes=${config.enableWrites} destructive=${config.enableDestructiveActions} permissions=${config.enablePermissionMutation} scriptRunner=${config.enableScriptRunner} unrestrictedScriptRunner=${config.enableUnrestrictedScriptRunner} scriptAllowlists=${config.scriptRunnerAllowlistPaths.length} scriptAllowlistManifests=${config.scriptRunnerAllowlistManifestPaths.length} unrestrictedRunner=${config.enableUnrestrictedRunner} unrestrictedRoots=${config.unrestrictedRunnerRoots.length} unrestrictedApproval=${config.unrestrictedRunnerRequireSessionApproval} opAuth=${config.opCliAuthMode} audit=${config.auditLogPath}`,
   );
   if (unrestrictedApprovalServer) {
     console.error(
@@ -59,6 +74,7 @@ async function main(): Promise<void> {
       auditLogger,
       scriptRunner,
       unrestrictedRunner,
+      unrestrictedApprovalManager,
     );
     console.error(`[mcp-1password] listening on ${httpServer.url}`);
 
@@ -72,6 +88,10 @@ async function main(): Promise<void> {
     }
 
     const shutdown = async () => {
+      recordDiagnosticAudit(config, auditLogger, "server_shutdown", "success", {
+        ...processMetadata(config),
+        reason: "signal",
+      });
       await httpServer.close();
       await unrestrictedApprovalServer?.close();
       process.exit(0);
@@ -91,8 +111,36 @@ async function main(): Promise<void> {
     auditLogger,
     scriptRunner,
     unrestrictedRunner,
+    unrestrictedApprovalManager,
   );
   const transport = new StdioServerTransport();
+  let shuttingDown = false;
+  const shutdown = async (reason: string) => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    recordDiagnosticAudit(config, auditLogger, "server_shutdown", "success", {
+      ...processMetadata(config),
+      reason,
+    });
+    await server.close();
+    await unrestrictedApprovalServer?.close();
+    process.exit(0);
+  };
+  process.once("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+  process.once("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
+  installStdioShutdownHandler(process.stdin, async (reason) => {
+    recordDiagnosticAudit(config, auditLogger, "stdio_closed", "success", {
+      ...processMetadata(config),
+      reason,
+    });
+    await shutdown(reason);
+  });
   await server.connect(transport);
 }
 

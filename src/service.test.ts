@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Client, VaultOverview } from "@1password/sdk";
+import { MemoryAuditLogger } from "./audit.js";
 import type { ServerConfig } from "./config.js";
 import { SdkOnePasswordService } from "./service.js";
 
@@ -13,6 +14,7 @@ function createConfig(): ServerConfig {
     enableDestructiveActions: false,
     enablePermissionMutation: false,
     enableScriptRunner: false,
+    enableUnrestrictedScriptRunner: false,
     scriptRunnerRoots: [],
     scriptRunnerAllowlistPaths: [],
     scriptRunnerAllowlistManifestPaths: [],
@@ -23,6 +25,9 @@ function createConfig(): ServerConfig {
     unrestrictedRunnerApprovalPort: 0,
     unrestrictedRunnerApprovalTtlMs: 12 * 60 * 60_000,
     unrestrictedRunnerCommandTimeoutMs: 600_000,
+    approvalRememberStorePath: "/tmp/onepassword-mcp-test-approvals.enc.json",
+    approvalRememberKeyPath: "/tmp/onepassword-mcp-test-approvals.key",
+    approvalRememberTtlMs: 24 * 60 * 60_000,
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "stdio",
@@ -35,6 +40,7 @@ function createConfig(): ServerConfig {
     httpSessionIdleMs: 15 * 60_000,
     httpRequestTimeoutMs: 30_000,
     auditLogPath: "/tmp/onepassword-mcp-test-audit.jsonl",
+    enableDiagnostics: false,
     logLevel: "info",
     integrationName: "Test",
     integrationVersion: "0.1.0",
@@ -84,4 +90,39 @@ test("SdkOnePasswordService keeps the original error for non-retryable failures"
 
   await assert.rejects(() => service.vaultList(), /permission denied/);
   assert.equal(factoryCalls, 1);
+});
+
+test("SdkOnePasswordService diagnostics record client creation and triggering operation", async () => {
+  const auditLogger = new MemoryAuditLogger();
+  const config = { ...createConfig(), enableDiagnostics: true };
+  const expectedVaults = [{ id: "vault-1", title: "Primary" }] as unknown as VaultOverview[];
+
+  const service = new SdkOnePasswordService(
+    config,
+    async () =>
+      ({
+        vaults: {
+          list: async () => expectedVaults,
+        },
+      }) as unknown as Client,
+    auditLogger,
+  );
+
+  await service.vaultList();
+
+  assert(
+    auditLogger.events.some(
+      (event) =>
+        event.action === "op_sdk_client_create_start" &&
+        event.metadata.triggerOperation === "vault_list",
+    ),
+  );
+  assert(
+    auditLogger.events.some(
+      (event) =>
+        event.action === "op_sdk_operation" &&
+        event.outcome === "success" &&
+        event.metadata.operation === "vault_list",
+    ),
+  );
 });

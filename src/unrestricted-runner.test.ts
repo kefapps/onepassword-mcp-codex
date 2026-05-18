@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath } from "node:fs/promises";
+import { mkdtemp, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,6 +22,7 @@ function createConfig(root: string, overrides: Partial<ServerConfig> = {}): Serv
     enableDestructiveActions: false,
     enablePermissionMutation: false,
     enableScriptRunner: false,
+    enableUnrestrictedScriptRunner: false,
     scriptRunnerRoots: [],
     scriptRunnerAllowlistPaths: [],
     scriptRunnerAllowlistManifestPaths: [],
@@ -32,6 +33,9 @@ function createConfig(root: string, overrides: Partial<ServerConfig> = {}): Serv
     unrestrictedRunnerApprovalPort: 0,
     unrestrictedRunnerApprovalTtlMs: 12 * 60 * 60_000,
     unrestrictedRunnerCommandTimeoutMs: 600_000,
+    approvalRememberStorePath: "/tmp/onepassword-mcp-test-approvals.enc.json",
+    approvalRememberKeyPath: "/tmp/onepassword-mcp-test-approvals.key",
+    approvalRememberTtlMs: 24 * 60 * 60_000,
     opCliPath: "op",
     opCliAuthMode: "auto",
     transport: "stdio",
@@ -44,6 +48,7 @@ function createConfig(root: string, overrides: Partial<ServerConfig> = {}): Serv
     httpSessionIdleMs: 15 * 60_000,
     httpRequestTimeoutMs: 30_000,
     auditLogPath: "/tmp/onepassword-mcp-test-audit.jsonl",
+    enableDiagnostics: false,
     logLevel: "info",
     integrationName: "Test",
     integrationVersion: "0.1.0",
@@ -111,6 +116,7 @@ test("unrestricted approval server requires checkbox and exact acknowledgement",
     const page = await getResponse.text();
     assert.equal(getResponse.status, 200);
     assert.match(page, /Approve Unrestricted Command Execution/);
+    assert.match(page, /Remember this approval for 24 hours/);
     assert.match(page, new RegExp(UNRESTRICTED_RUNNER_ACK));
 
     const rejected = await fetch(`${handle.url}/approve`, {
@@ -137,9 +143,43 @@ test("unrestricted approval server requires checkbox and exact acknowledgement",
     assert.equal(approvalManager.isApproved(root), true);
     assert.equal(auditLogger.events.at(-1)?.action, "op_unrestricted_runner_approve");
     assert.equal(auditLogger.events.at(-1)?.outcome, "success");
+    assert.equal(auditLogger.events.at(-1)?.metadata.remembered, false);
   } finally {
     await handle.close();
   }
+});
+
+test("unrestricted approval can remember encrypted grants across manager instances", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "unrestricted-remember-root-")));
+  const storeDir = await mkdtemp(join(tmpdir(), "unrestricted-remember-store-"));
+  const storePath = join(storeDir, "grants.enc.json");
+  const keyPath = join(storeDir, "grants.key");
+  const persistence = {
+    storePath,
+    keyPath,
+    rememberTtlMs: 24 * 60 * 60_000,
+  };
+  const approvalManager = new UnrestrictedApprovalManager(60_000, persistence);
+  approvalManager.setApprovalBaseUrl("http://127.0.0.1:19000");
+
+  const request = approvalManager.createAuthorizationRequest(
+    root,
+    "unrestricted-script-runner-session",
+  );
+  const token = new URL(request.approvalUrl).searchParams.get("token") ?? "";
+  const result = approvalManager.approveToken(
+    token,
+    true,
+    UNRESTRICTED_RUNNER_ACK,
+    true,
+  );
+  const encryptedStore = await readFile(storePath, "utf8");
+  const reloadedApprovalManager = new UnrestrictedApprovalManager(60_000, persistence);
+
+  assert.equal(result.remembered, true);
+  assert.equal(reloadedApprovalManager.isApproved("unrestricted-script-runner-session"), true);
+  assert(!encryptedStore.includes("unrestricted-script-runner-session"));
+  assert(!encryptedStore.includes(root));
 });
 
 test("unrestricted runner gates arbitrary shell command execution by approved root", async () => {
@@ -170,7 +210,7 @@ test("unrestricted runner gates arbitrary shell command execution by approved ro
   assert.equal(result.sensitiveOutput, true);
   assert.equal(fakeProcessRunner.lastCall?.cwd, root);
   assert.equal(fakeProcessRunner.lastCall?.command, "/bin/sh");
-  assert.deepEqual(fakeProcessRunner.lastCall?.args, ["-lc", "echo ok"]);
+  assert.deepEqual(fakeProcessRunner.lastCall?.args, ["-c", "echo ok"]);
   assert.equal(fakeProcessRunner.lastCall?.timeoutMs, 12_345);
 });
 

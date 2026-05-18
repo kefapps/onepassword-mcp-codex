@@ -1,5 +1,9 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SDK_CAPABILITIES } from "./capabilities.js";
+import {
+  SDK_CAPABILITIES,
+  backendCapabilities,
+  effectiveSupportedTools,
+} from "./capabilities.js";
 import type { ServerConfig } from "./config.js";
 import { redactItem, redactItemOverview } from "./redaction.js";
 import type { OnePasswordService } from "./service.js";
@@ -21,6 +25,7 @@ export function registerOnePasswordResources(
   config: ServerConfig,
   service: OnePasswordService,
 ): void {
+  const capabilities = backendCapabilities(config);
   server.registerResource(
     "1password-config",
     "onepassword://config",
@@ -32,12 +37,15 @@ export function registerOnePasswordResources(
     async () =>
       jsonResource("onepassword://config", {
         authMode: config.authMode,
+        backend: config.authMode,
         accountConfigured: Boolean(config.account),
+        connectHostConfigured: Boolean(config.connectHost),
         secretRevealEnabled: config.enableSecretReveal,
         writesEnabled: config.enableWrites,
         destructiveActionsEnabled: config.enableDestructiveActions,
         permissionMutationEnabled: config.enablePermissionMutation,
         scriptRunnerEnabled: config.enableScriptRunner,
+        unrestrictedScriptRunnerEnabled: config.enableUnrestrictedScriptRunner,
         scriptRunnerRootCount: config.scriptRunnerRoots.length,
         scriptRunnerAllowlistCount: config.scriptRunnerAllowlistPaths.length,
         scriptRunnerAllowlistManifestCount:
@@ -49,9 +57,11 @@ export function registerOnePasswordResources(
         unrestrictedRunnerApprovalTtlMs: config.unrestrictedRunnerApprovalTtlMs,
         unrestrictedRunnerCommandTimeoutMs:
           config.unrestrictedRunnerCommandTimeoutMs,
+        approvalRememberTtlMs: config.approvalRememberTtlMs,
         opCliAuthMode: config.opCliAuthMode,
         opCliPathConfigured: Boolean(config.opCliPath),
         transport: config.transport,
+        diagnosticsEnabled: config.enableDiagnostics,
         httpPath: config.httpPath,
         httpRequireBearer: config.httpRequireBearer,
         httpAllowedOriginCount: config.httpAllowedOrigins.length,
@@ -60,7 +70,11 @@ export function registerOnePasswordResources(
         httpRequestTimeoutMs: config.httpRequestTimeoutMs,
         integrationName: config.integrationName,
         integrationVersion: config.integrationVersion,
-        capabilities: SDK_CAPABILITIES,
+        capabilities: {
+          ...SDK_CAPABILITIES,
+          backendCapabilities: capabilities,
+          effectiveSupportedTools: effectiveSupportedTools(config),
+        },
       }),
   );
 
@@ -86,7 +100,8 @@ export function registerOnePasswordResources(
 
   const vaultItemsTemplate = new ResourceTemplate("onepassword://vaults/{vaultId}/items", {
     list: async () => {
-      const vaults = await service.vaultList({ decryptDetails: false });
+      // Keep resources/list passive; clients call it during startup and refresh.
+      const vaults: Awaited<ReturnType<OnePasswordService["vaultList"]>> = [];
       return {
         resources: vaults.map((vault) => ({
           name: `1password-vault-items-${vault.id}`,
@@ -131,14 +146,15 @@ export function registerOnePasswordResources(
     },
   );
 
-  const environmentVariablesTemplate = new ResourceTemplate(
+  if (capabilities.environments) {
+    const environmentVariablesTemplate = new ResourceTemplate(
     "onepassword://environments/{environmentId}/variables",
     {
       list: undefined,
     },
   );
 
-  server.registerResource(
+    server.registerResource(
     "1password-environment-variables",
     environmentVariablesTemplate,
     {
@@ -159,7 +175,8 @@ export function registerOnePasswordResources(
         })),
       });
     },
-  );
+    );
+  }
 
   const itemMetadataTemplate = new ResourceTemplate(
     "onepassword://vaults/{vaultId}/items/{itemId}/metadata",
