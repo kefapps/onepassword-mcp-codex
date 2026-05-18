@@ -10,6 +10,7 @@ import type { OnePasswordService } from "./service.js";
 import {
   DefaultUnrestrictedRunner,
   UnrestrictedApprovalManager,
+  createUnrestrictedApprovalManager,
   type UnrestrictedRunner,
 } from "./unrestricted-runner.js";
 
@@ -196,23 +197,14 @@ export async function startOnePasswordHttpServer(
   service: OnePasswordService,
   auditLogger: AuditLogger,
   scriptRunner: OpScriptRunner,
-  unrestrictedRunner: UnrestrictedRunner = new DefaultUnrestrictedRunner(
-    config,
-    new UnrestrictedApprovalManager(config.unrestrictedRunnerApprovalTtlMs, {
-      storePath: config.approvalRememberStorePath,
-      keyPath: config.approvalRememberKeyPath,
-      rememberTtlMs: config.approvalRememberTtlMs,
-    }),
-  ),
-  approvalManager: UnrestrictedApprovalManager = new UnrestrictedApprovalManager(
-    config.unrestrictedRunnerApprovalTtlMs,
-    {
-      storePath: config.approvalRememberStorePath,
-      keyPath: config.approvalRememberKeyPath,
-      rememberTtlMs: config.approvalRememberTtlMs,
-    },
-  ),
+  providedUnrestrictedRunner?: UnrestrictedRunner,
+  providedApprovalManager?: UnrestrictedApprovalManager,
 ): Promise<OnePasswordHttpServerHandle> {
+  const approvalManager =
+    providedApprovalManager ?? createUnrestrictedApprovalManager(config);
+  const unrestrictedRunner =
+    providedUnrestrictedRunner ??
+    new DefaultUnrestrictedRunner(config, approvalManager);
   const transports = new Map<string, SessionEntry>();
   const clearSession = (sessionId: string): void => {
     const entry = transports.get(sessionId);

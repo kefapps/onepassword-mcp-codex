@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import {
   type GetVariablesResponse,
@@ -449,6 +450,7 @@ async function createClientAndServer(
     unrestrictedRunner?: UnrestrictedRunner;
     approvalManager?: UnrestrictedApprovalManager;
     unrestrictedRunnerRequireSessionApproval?: boolean;
+    unrestrictedRunnerRoots?: string[];
   } = {},
 ) {
   const config: ServerConfig = {
@@ -469,7 +471,7 @@ async function createClientAndServer(
     scriptRunnerAllowlistPaths: ["/workspace/.onepassword-mcp.json"],
     scriptRunnerAllowlistManifestPaths: [],
     enableUnrestrictedRunner: options.enableUnrestrictedRunner ?? false,
-    unrestrictedRunnerRoots: ["/workspace"],
+    unrestrictedRunnerRoots: options.unrestrictedRunnerRoots ?? ["/workspace"],
     unrestrictedRunnerRequireSessionApproval:
       options.unrestrictedRunnerRequireSessionApproval ?? true,
     unrestrictedRunnerApprovalHost: "127.0.0.1",
@@ -1693,6 +1695,34 @@ test("unrestricted runner returns local approval URL before running", async () =
     auditLogger.events.at(-1)?.action,
     "op_unrestricted_run_authorization_required",
   );
+});
+
+test("default unrestricted runner reuses the supplied approval manager", async () => {
+  const workspaceRoot = tmpdir();
+  const approvalManager = new UnrestrictedApprovalManager(60_000);
+  approvalManager.setApprovalBaseUrl("http://127.0.0.1:19000");
+  const { client } = await createClientAndServer(false, {
+    enableUnrestrictedRunner: true,
+    approvalManager,
+    unrestrictedRunnerRoots: [workspaceRoot],
+  });
+
+  const result = await client.callTool({
+    name: "op_unrestricted_run",
+    arguments: {
+      workspaceRoot,
+      command: "printf ok",
+      reason: "Need broad command execution in this worktree",
+    },
+  });
+  const payload = result.structuredContent as {
+    authorizationRequired: boolean;
+    approvalUrl: string;
+  };
+
+  assert.notEqual(result.isError, true);
+  assert.equal(payload.authorizationRequired, true);
+  assert.match(payload.approvalUrl, /^http:\/\/127\.0\.0\.1:19000\/approve/);
 });
 
 test("unrestricted runner requires acknowledgement before execution when output is requested", async () => {
