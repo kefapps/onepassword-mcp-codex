@@ -558,14 +558,14 @@ async function getAllowlistedCommand(
   return command;
 }
 
-function sanitizeAuditString(value: string): string {
+export function sanitizeAuditString(value: string): string {
   return value
     .replace(/op:\/\/[^\s"']+/gi, "[REDACTED_REFERENCE]")
     .replace(/OP_SESSION(?:_[A-Z0-9_]+)?=[^\s"']+/gi, "OP_SESSION=[REDACTED]")
     .replace(/OP_SERVICE_ACCOUNT_TOKEN=[^\s"']+/gi, "OP_SERVICE_ACCOUNT_TOKEN=[REDACTED]");
 }
 
-function sanitizeAuditValue(value: unknown): unknown {
+export function sanitizeAuditValue(value: unknown): unknown {
   if (typeof value === "string") {
     return sanitizeAuditString(value);
   }
@@ -573,9 +573,23 @@ function sanitizeAuditValue(value: unknown): unknown {
     return value.map((entry) => sanitizeAuditValue(entry));
   }
   if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, sanitizeAuditValue(entry)]),
-    );
+    // Walk own keys via Reflect.ownKeys to include non-enumerable properties
+    // (Error.message / .name / .stack live there, and SDKs such as AWS or
+    // undici stash credentials on non-enumerable props) and Symbol keys.
+    // Symbol keys are stringified so the sanitized snapshot survives
+    // JSON.stringify in the audit logger.
+    const out: Record<string, unknown> = {};
+    for (const key of Reflect.ownKeys(value)) {
+      const stringKey = typeof key === "symbol" ? key.toString() : key;
+      let entry: unknown;
+      try {
+        entry = (value as Record<PropertyKey, unknown>)[key];
+      } catch {
+        entry = "[unreadable]";
+      }
+      out[stringKey] = sanitizeAuditValue(entry);
+    }
+    return out;
   }
   return value;
 }
