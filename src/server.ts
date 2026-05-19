@@ -486,12 +486,12 @@ function validateEnvSecretRefs(
     if (!envVariableNamePattern.test(envVar)) {
       throw new Error(`Invalid environment variable name for secret injection: ${envVar}.`);
     }
-    if (reservedScriptEnvKeys.has(envVar)) {
+    if (reservedScriptEnvKeys.has(envVar.toUpperCase())) {
       throw new Error(`Environment variable ${envVar} is reserved and cannot be injected.`);
     }
 
     const trimmedReference = reference.trim();
-    if (!trimmedReference.startsWith("op://")) {
+    if (!trimmedReference.toLowerCase().startsWith("op://")) {
       throw new Error(
         `Secret reference for ${envVar} must be an op:// reference.`,
       );

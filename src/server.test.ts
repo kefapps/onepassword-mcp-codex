@@ -1640,6 +1640,54 @@ test("script runner injects 1Password secrets without returning plaintext", asyn
   assert(!auditPayload.includes("supabase-db-password-secret"));
 });
 
+test("script runner rejects reserved secret env vars case-insensitively", async () => {
+  const { client, service } = await createClientAndServer(false, {
+    enableScriptRunner: true,
+    scriptRunner: new FakeOpScriptRunner(),
+  });
+
+  const result = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      commandId: "deploy",
+      reason: "Need to verify reserved env var validation",
+      envSecretRefs: {
+        op_service_account_token: "op://vault/item/password",
+      },
+    },
+  });
+  const textContent = result.content as Array<{ type: string; text?: string }>;
+
+  assert.equal(result.isError, true);
+  assert.match(textContent[0]?.text ?? "", /reserved and cannot be injected/);
+  assert.equal(service.secretResolveCalls.length, 0);
+});
+
+test("script runner accepts case-insensitive secret reference schemes", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  const { client, service } = await createClientAndServer(false, {
+    enableScriptRunner: true,
+    scriptRunner,
+  });
+
+  const result = await client.callTool({
+    name: "op_script_run",
+    arguments: {
+      workspaceRoot: "/workspace",
+      commandId: "deploy",
+      reason: "Need to verify secret reference scheme handling",
+      envSecretRefs: {
+        SERVICE_PASSWORD: "OP://vault/item/password",
+      },
+    },
+  });
+
+  assert.notEqual(result.isError, true);
+  assert.equal(service.secretResolveCalls[0], "OP://vault/item/password");
+  assert.equal(scriptRunner.lastRunOptions?.extraEnv?.SERVICE_PASSWORD, "resolved-secret");
+});
+
 test("script runner requires acknowledgement before executing injected-secret output", async () => {
   const scriptRunner = new FakeOpScriptRunner();
   scriptRunner.nextStdout = "connected with supabase-db-password-secret\n";
