@@ -68,11 +68,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function equalsIdentifier(candidate: string | undefined, wanted: string): boolean {
-  return candidate?.trim().toLowerCase() === wanted.trim().toLowerCase();
+  // NFC normalization: a field title typed as `café` (precomposed) must
+  // match a stored title `café` (NFD: e + combining acute). macOS
+  // filesystems emit NFD for some characters; users often type NFC.
+  return (
+    candidate?.normalize("NFC").trim().toLowerCase() ===
+    wanted.normalize("NFC").trim().toLowerCase()
+  );
 }
 
 function decodeReferencePathSegment(segment: string): string {
-  return decodeURIComponent(segment.replace(/\+/g, "%20"));
+  try {
+    return decodeURIComponent(segment.replace(/\+/g, "%20"));
+  } catch {
+    // decodeURIComponent throws URIError on malformed escapes (`%E0` without
+    // a continuation byte). Surface a typed error consistent with the rest of
+    // parseSecretReference rather than letting the raw URIError leak.
+    throw new Error(`Invalid 1Password secret reference segment: ${segment}`);
+  }
 }
 
 function parseSecretReference(reference: string): {
