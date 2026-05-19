@@ -560,7 +560,7 @@ async function getAllowlistedCommand(
 
 function sanitizeAuditString(value: string): string {
   return value
-    .replace(/op:\/\/[^\s"']+/g, "[REDACTED_REFERENCE]")
+    .replace(/op:\/\/[^\s"']+/gi, "[REDACTED_REFERENCE]")
     .replace(/OP_SESSION(?:_[A-Z0-9_]+)?=[^\s"']+/gi, "OP_SESSION=[REDACTED]")
     .replace(/OP_SERVICE_ACCOUNT_TOKEN=[^\s"']+/gi, "OP_SERVICE_ACCOUNT_TOKEN=[REDACTED]");
 }

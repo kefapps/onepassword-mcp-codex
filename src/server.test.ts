@@ -1298,6 +1298,23 @@ test("secret reveal succeeds and audits when enabled", async () => {
   assert.equal(auditLogger.events[0]?.outcome, "success");
 });
 
+test("secret references are redacted case-insensitively in audit logs", async () => {
+  const { client, auditLogger } = await createClientAndServer(true);
+  const result = await client.callTool({
+    name: "secret_reveal",
+    arguments: {
+      reason: "Need to rotate the credential",
+      acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT",
+      reference: "OP://vault/item/password",
+    },
+  });
+  const auditPayload = JSON.stringify(auditLogger.events.at(-1));
+
+  assert.notEqual(result.isError, true);
+  assert(!auditPayload.includes("OP://vault/item/password"));
+  assert.match(auditPayload, /\[REDACTED_REFERENCE\]/);
+});
+
 test("script runner lists and runs allowlisted commands with audit", async () => {
   const scriptRunner = new FakeOpScriptRunner();
   const { client, auditLogger } = await createClientAndServer(false, {
