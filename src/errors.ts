@@ -88,5 +88,8 @@ export function normalizeError(error: unknown): Error {
   if (error instanceof Error) {
     return error;
   }
-  return new Error(errorMessage(error), { cause: error });
+  // Intentionally drop the raw value: preserving it as `cause` would allow
+  // unsanitized payloads (1Password tokens, Connect URLs with credentials) to
+  // resurface through Node's Error.cause chain formatting in stderr / JSON.
+  return new Error(errorMessage(error));
 }

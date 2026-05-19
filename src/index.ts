@@ -8,6 +8,7 @@ import { FileAuditLogger } from "./audit.js";
 import { HelpError, parseConfig } from "./config.js";
 import { ConnectOnePasswordService } from "./connect-service.js";
 import { processMetadata, recordDiagnosticAudit } from "./diagnostics.js";
+import { errorMessage } from "./errors.js";
 import { startOnePasswordHttpServer } from "./http-server.js";
 import { installStdioShutdownHandler } from "./lifecycle.js";
 import { DefaultOpScriptRunner } from "./op-runner.js";
@@ -142,6 +143,8 @@ main().catch((error) => {
     console.error(error.message);
     process.exit(0);
   }
-  console.error("[mcp-1password] fatal:", error);
+  // Use errorMessage() rather than logging the raw error: Node prints
+  // Error.cause chains verbatim, which could surface unsanitized secrets.
+  console.error(`[mcp-1password] fatal: ${errorMessage(error)}`);
   process.exit(1);
 });
