@@ -91,7 +91,7 @@ export function upsertPasswordField(
 ): Item {
   const wanted = selector.trim();
   const wantedLower = wanted.toLowerCase();
-  const nextFields = [...item.fields];
+  const nextFields = item.fields.map((field) => ({ ...field }));
 
   for (const field of nextFields) {
     const idMatch = field.id.toLowerCase() === wantedLower;

@@ -13,6 +13,7 @@ import { dirname, isAbsolute, relative, sep } from "node:path";
 import type { AuditLogger } from "./audit.js";
 import type { ServerConfig } from "./config.js";
 import { UNRESTRICTED_RUNNER_ACK } from "./constants.js";
+import { errorMessage } from "./errors.js";
 import {
   DEFAULT_OUTPUT_LIMIT_BYTES,
   NodeProcessRunner,
@@ -528,14 +529,14 @@ export async function startUnrestrictedApprovalServer(
         action: "op_unrestricted_runner_approve",
         outcome: "error",
         metadata: {},
-        errorMessage: String(error),
+        errorMessage: errorMessage(error),
       });
       const statusCode = error instanceof ApprovalRequestError ? error.statusCode : 400;
       sendApprovalPage(
         response,
         statusCode,
         "Approval Failed",
-        failureBody(error instanceof Error ? error.message : String(error)),
+        failureBody(errorMessage(error)),
       );
     }
   });

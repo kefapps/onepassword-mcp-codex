@@ -24,6 +24,7 @@ import {
   recordDiagnosticAudit,
   type RuntimeDiagnostics,
 } from "./diagnostics.js";
+import { errorMessage, normalizeError } from "./errors.js";
 
 type ClientFactory = (config: ServerConfig) => Promise<Client>;
 
@@ -97,11 +98,7 @@ export class SdkOnePasswordService implements OnePasswordService {
   }
 
   private shouldRefreshClient(error: unknown): boolean {
-    if (!(error instanceof Error)) {
-      return false;
-    }
-
-    return /invalid client id/i.test(error.message);
+    return /invalid client id/i.test(errorMessage(error));
   }
 
   private resetClient(): void {
@@ -130,13 +127,14 @@ export class SdkOnePasswordService implements OnePasswordService {
           return client;
         })
         .catch((error) => {
+          const normalizedError = normalizeError(error);
           this.lastSdkAuthOutcome = "error";
           this.recordDiagnostic("op_sdk_client_create", "error", {
             triggerOperation,
             authMode: this.config.authMode,
-          }, error);
+          }, normalizedError);
           this.resetClient();
-          throw error;
+          throw normalizedError;
         });
     }
 
@@ -158,25 +156,37 @@ export class SdkOnePasswordService implements OnePasswordService {
       });
       return result;
     } catch (error) {
-      if (!this.shouldRefreshClient(error)) {
+      const normalizedError = normalizeError(error);
+      if (!this.shouldRefreshClient(normalizedError)) {
         this.recordDiagnostic("op_sdk_operation", "error", {
           operation: operationName,
           durationMs: Date.now() - startedAt,
           sdkClientCreated: this.sdkClientCreated,
           retried: false,
-        }, error);
-        throw error;
+        }, normalizedError);
+        throw normalizedError;
       }
 
       this.resetClient();
-      const result = await operation(await this.getClient(operationName));
-      this.recordDiagnostic("op_sdk_operation", "success", {
-        operation: operationName,
-        durationMs: Date.now() - startedAt,
-        sdkClientCreated: this.sdkClientCreated,
-        retried: true,
-      });
-      return result;
+      try {
+        const result = await operation(await this.getClient(operationName));
+        this.recordDiagnostic("op_sdk_operation", "success", {
+          operation: operationName,
+          durationMs: Date.now() - startedAt,
+          sdkClientCreated: this.sdkClientCreated,
+          retried: true,
+        });
+        return result;
+      } catch (retryError) {
+        const normalizedRetryError = normalizeError(retryError);
+        this.recordDiagnostic("op_sdk_operation", "error", {
+          operation: operationName,
+          durationMs: Date.now() - startedAt,
+          sdkClientCreated: this.sdkClientCreated,
+          retried: true,
+        }, normalizedRetryError);
+        throw normalizedRetryError;
+      }
     }
   }
 

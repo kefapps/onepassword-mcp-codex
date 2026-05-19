@@ -28,6 +28,7 @@ import {
   recordDiagnosticAudit,
   type RuntimeDiagnostics,
 } from "./diagnostics.js";
+import { errorMessage, normalizeError } from "./errors.js";
 import {
   DESTRUCTIVE_ACTION_ACK,
   GENERATED_SECRET_ACK,
@@ -584,13 +585,13 @@ function recordAudit(
   action: string,
   outcome: "success" | "error",
   metadata: Record<string, unknown>,
-  errorMessage?: string,
+  error?: unknown,
 ): void {
   auditLogger.record({
     action,
     outcome,
     metadata: sanitizeAuditValue(metadata) as Record<string, unknown>,
-    errorMessage: errorMessage ? sanitizeAuditString(errorMessage) : undefined,
+    errorMessage: error === undefined ? undefined : sanitizeAuditString(errorMessage(error)),
   });
 }
 
@@ -633,7 +634,7 @@ function instrumentMcpRequests(
           ppid: process.ppid,
           durationMs: Date.now() - startedAt,
         }, error);
-        throw error;
+        throw normalizeError(error);
       }
     })) as SetRequestHandler;
 }
@@ -1092,9 +1093,9 @@ export function createOnePasswordMcpServer(
               configuredAllowlistManifestCount:
                 config.scriptRunnerAllowlistManifestPaths.length,
             },
-            String(error),
+            error,
           );
-          throw error;
+          throw normalizeError(error);
         }
       },
     );
@@ -1357,9 +1358,9 @@ export function createOnePasswordMcpServer(
               injectedSecretEnvVars,
               envSecretReferences,
             },
-            String(error),
+            error,
           );
-          throw error;
+          throw normalizeError(error);
         }
       },
     );
@@ -1494,9 +1495,9 @@ export function createOnePasswordMcpServer(
               commandLength: command.length,
               reason,
             },
-            String(error),
+            error,
           );
-          throw error;
+          throw normalizeError(error);
         }
       },
     );
@@ -1538,9 +1539,9 @@ export function createOnePasswordMcpServer(
           "password_generate",
           "error",
           { kind: "random-password", reason: args.reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );
@@ -1583,9 +1584,9 @@ export function createOnePasswordMcpServer(
           "password_generate_memorable",
           "error",
           { kind: "memorable-password", reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );
@@ -1670,9 +1671,9 @@ export function createOnePasswordMcpServer(
           "password_read",
           "error",
           { secretReference, vaultId, itemId, field, reason, reveal: true },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );
@@ -1774,9 +1775,9 @@ export function createOnePasswordMcpServer(
             title: args.title,
             mode: passwordState.mode,
           },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );
@@ -1837,9 +1838,9 @@ export function createOnePasswordMcpServer(
             field: passwordFieldId,
             mode: passwordState.mode,
           },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
     );
@@ -1901,8 +1902,8 @@ export function createOnePasswordMcpServer(
         recordAudit(auditLogger, "vault_create", "success", { title });
         return jsonResult({ vault: redactVault(vault) });
       } catch (error) {
-        recordAudit(auditLogger, "vault_create", "error", { title }, String(error));
-        throw error;
+        recordAudit(auditLogger, "vault_create", "error", { title }, error);
+        throw normalizeError(error);
       }
     },
   );
@@ -1923,8 +1924,8 @@ export function createOnePasswordMcpServer(
         recordAudit(auditLogger, "vault_update", "success", { vaultId });
         return jsonResult({ vault: redactVault(vault) });
       } catch (error) {
-        recordAudit(auditLogger, "vault_update", "error", { vaultId }, String(error));
-        throw error;
+        recordAudit(auditLogger, "vault_update", "error", { vaultId }, error);
+        throw normalizeError(error);
       }
     },
   );
@@ -1948,8 +1949,8 @@ export function createOnePasswordMcpServer(
         recordAudit(auditLogger, "vault_delete", "success", { vaultId, reason });
         return jsonResult({ deleted: true, vaultId });
       } catch (error) {
-        recordAudit(auditLogger, "vault_delete", "error", { vaultId, reason }, String(error));
-        throw error;
+        recordAudit(auditLogger, "vault_delete", "error", { vaultId, reason }, error);
+        throw normalizeError(error);
       }
     },
     );
@@ -2034,9 +2035,9 @@ export function createOnePasswordMcpServer(
           "vault_permissions_grant_group",
           "error",
           { vaultId, groupId, permissions, reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );
@@ -2082,9 +2083,9 @@ export function createOnePasswordMcpServer(
           "vault_permissions_update_group",
           "error",
           { vaultId, groupId, permissions, reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );
@@ -2119,9 +2120,9 @@ export function createOnePasswordMcpServer(
           "vault_permissions_revoke_group",
           "error",
           { vaultId, groupId, reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
     );
@@ -2146,21 +2147,36 @@ export function createOnePasswordMcpServer(
           : await service.vaultList({ decryptDetails: false });
 
       const itemFilters = createItemFilters(includeArchived ?? false);
-      const results = [];
+      const results: ReturnType<typeof redactItemOverview>[] = [];
+      const failures: Array<{ vaultId: string; errorMessage: string }> = [];
 
       for (const vault of targetVaults) {
-        const items = await service.itemList(vault.id, ...itemFilters);
-        for (const item of items) {
-          const redacted = redactItemOverview(item);
-          if (matchesQuery(redacted, query)) {
-            results.push(redacted);
+        try {
+          const items = await service.itemList(vault.id, ...itemFilters);
+          for (const item of items) {
+            const redacted = redactItemOverview(item);
+            if (matchesQuery(redacted, query)) {
+              results.push(redacted);
+            }
           }
+        } catch (error) {
+          if (vaultId !== undefined) {
+            throw normalizeError(error);
+          }
+          failures.push({
+            vaultId: vault.id,
+            errorMessage: errorMessage(error),
+          });
         }
       }
 
       return jsonResult({
         items: results.slice(0, limit ?? 50),
         totalMatched: results.length,
+        searchedVaultCount: targetVaults.length,
+        failedVaultCount: failures.length,
+        partialFailure: failures.length > 0,
+        failures,
       });
     },
   );
@@ -2223,9 +2239,9 @@ export function createOnePasswordMcpServer(
           "item_create",
           "error",
           { vaultId, category, title },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );
@@ -2268,9 +2284,9 @@ export function createOnePasswordMcpServer(
           "item_update",
           "error",
           { vaultId, itemId },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );
@@ -2301,9 +2317,9 @@ export function createOnePasswordMcpServer(
           "item_archive",
           "error",
           { vaultId, itemId, reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
       );
@@ -2332,9 +2348,9 @@ export function createOnePasswordMcpServer(
           "item_delete",
           "error",
           { vaultId, itemId, reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
       );
@@ -2429,9 +2445,9 @@ export function createOnePasswordMcpServer(
           "environment_reveal_variable",
           "error",
           { environmentId, name, reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
     );
@@ -2492,9 +2508,9 @@ export function createOnePasswordMcpServer(
           "secret_reveal",
           "error",
           { reference, vaultId, itemId, fieldId, reason },
-          String(error),
+          error,
         );
-        throw error;
+        throw normalizeError(error);
       }
     },
   );

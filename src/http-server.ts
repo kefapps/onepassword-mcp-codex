@@ -15,6 +15,9 @@ import {
 } from "./unrestricted-runner.js";
 
 const MAX_HTTP_BODY_BYTES = 1024 * 1024;
+const HTTP_METHODS = "GET, POST, DELETE, OPTIONS";
+const CORS_ALLOWED_HEADERS =
+  "authorization, content-type, mcp-session-id, mcp-protocol-version";
 
 export interface OnePasswordHttpServerHandle {
   server: Server;
@@ -71,22 +74,38 @@ function jsonRpcErrorResponse(
   );
 }
 
-function unauthorizedResponse(response: ServerResponse): void {
+function unauthorizedResponse(
+  response: ServerResponse,
+  headers: Record<string, string> = {},
+): void {
   jsonRpcErrorResponse(response, 401, -32001, "Unauthorized", {
+    ...headers,
     "www-authenticate": "Bearer",
   });
 }
 
-function forbiddenResponse(response: ServerResponse): void {
-  jsonRpcErrorResponse(response, 403, -32003, "Forbidden");
+function forbiddenResponse(
+  response: ServerResponse,
+  headers: Record<string, string> = {},
+): void {
+  jsonRpcErrorResponse(response, 403, -32003, "Forbidden", headers);
 }
 
-function notFoundResponse(response: ServerResponse): void {
-  sendJson(response, 404, { error: "not_found" });
+function notFoundResponse(
+  response: ServerResponse,
+  headers: Record<string, string> = {},
+): void {
+  sendJson(response, 404, { error: "not_found" }, headers);
 }
 
-function methodNotAllowedResponse(response: ServerResponse): void {
-  sendJson(response, 405, { error: "method_not_allowed" }, { allow: "GET, POST, DELETE" });
+function methodNotAllowedResponse(
+  response: ServerResponse,
+  headers: Record<string, string> = {},
+): void {
+  sendJson(response, 405, { error: "method_not_allowed" }, {
+    ...headers,
+    allow: HTTP_METHODS,
+  });
 }
 
 function isExpectedBearerToken(header: string | string[] | undefined, token: string): boolean {
@@ -170,6 +189,34 @@ function assertOriginAllowed(
   return allowedOrigins(config, port).has(origin);
 }
 
+function corsHeaders(
+  config: ServerConfig,
+  request: IncomingMessage,
+  port: number,
+): Record<string, string> {
+  const origin = request.headers.origin;
+  if (!origin || Array.isArray(origin) || !allowedOrigins(config, port).has(origin)) {
+    return {};
+  }
+
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": HTTP_METHODS,
+    "access-control-allow-headers": CORS_ALLOWED_HEADERS,
+    "access-control-expose-headers": "mcp-session-id",
+    "access-control-max-age": "600",
+    vary: "Origin",
+  };
+}
+
+function noContentResponse(
+  response: ServerResponse,
+  headers: Record<string, string> = {},
+): void {
+  response.writeHead(204, headers);
+  response.end();
+}
+
 function listen(server: Server, host: string, port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -228,6 +275,7 @@ export async function startOnePasswordHttpServer(
   };
 
   const httpServer = createServer(async (request, response) => {
+    let responseHeaders: Record<string, string> = {};
     try {
       const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
       const address = httpServer.address();
@@ -237,24 +285,34 @@ export async function startOnePasswordHttpServer(
         forbiddenResponse(response);
         return;
       }
+      responseHeaders = corsHeaders(config, request, port);
 
       if (path === "/healthz") {
-        sendJson(response, 200, { ok: true });
+        if (request.method === "OPTIONS") {
+          noContentResponse(response, responseHeaders);
+          return;
+        }
+        sendJson(response, 200, { ok: true }, responseHeaders);
         return;
       }
 
       if (path !== config.httpPath) {
-        notFoundResponse(response);
+        notFoundResponse(response, responseHeaders);
+        return;
+      }
+
+      if (request.method === "OPTIONS") {
+        noContentResponse(response, responseHeaders);
         return;
       }
 
       if (!assertAuthorized(config, request)) {
-        unauthorizedResponse(response);
+        unauthorizedResponse(response, responseHeaders);
         return;
       }
 
       if (request.method !== "GET" && request.method !== "POST" && request.method !== "DELETE") {
-        methodNotAllowedResponse(response);
+        methodNotAllowedResponse(response, responseHeaders);
         return;
       }
 
@@ -274,7 +332,13 @@ export async function startOnePasswordHttpServer(
         isInitializeRequest(body)
       ) {
         if (transports.size >= config.httpMaxSessions) {
-          jsonRpcErrorResponse(response, 503, -32004, "Too many active MCP sessions.");
+          jsonRpcErrorResponse(
+            response,
+            503,
+            -32004,
+            "Too many active MCP sessions.",
+            responseHeaders,
+          );
           return;
         }
         transport = new StreamableHTTPServerTransport({
@@ -304,18 +368,39 @@ export async function startOnePasswordHttpServer(
       }
 
       if (!transport) {
-        jsonRpcErrorResponse(response, 400, -32000, "Bad Request: No valid MCP session.");
+        jsonRpcErrorResponse(
+          response,
+          400,
+          -32000,
+          "Bad Request: No valid MCP session.",
+          responseHeaders,
+        );
         return;
       }
 
+      for (const [header, value] of Object.entries(responseHeaders)) {
+        response.setHeader(header, value);
+      }
       await transport.handleRequest(request, response, body);
     } catch (error) {
       if (!response.headersSent) {
         if (error instanceof HttpRequestError) {
-          jsonRpcErrorResponse(response, error.statusCode, -32000, error.message);
+          jsonRpcErrorResponse(
+            response,
+            error.statusCode,
+            -32000,
+            error.message,
+            responseHeaders,
+          );
           return;
         }
-        jsonRpcErrorResponse(response, 500, -32603, "Internal server error");
+        jsonRpcErrorResponse(
+          response,
+          500,
+          -32603,
+          "Internal server error",
+          responseHeaders,
+        );
       } else {
         response.end();
       }

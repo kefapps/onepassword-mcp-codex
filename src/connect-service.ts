@@ -34,6 +34,7 @@ import {
   recordDiagnosticAudit,
   type RuntimeDiagnostics,
 } from "./diagnostics.js";
+import { normalizeError } from "./errors.js";
 import type { OnePasswordService } from "./service.js";
 
 export interface ConnectClient {
@@ -269,15 +270,16 @@ export class ConnectOnePasswordService implements OnePasswordService {
           return client;
         })
         .catch((error: unknown) => {
+          const normalizedError = normalizeError(error);
           this.lastConnectAuthOutcome = "error";
           this.clientPromise = undefined;
           this.recordDiagnostic(
             "op_connect_client_create",
             "error",
             { triggerOperation, connectHost: this.config.connectHost },
-            error,
+            normalizedError,
           );
-          throw error;
+          throw normalizedError;
         });
     }
     return this.clientPromise;
@@ -298,13 +300,14 @@ export class ConnectOnePasswordService implements OnePasswordService {
       });
       return result;
     } catch (error) {
+      const normalizedError = normalizeError(error);
       this.recordDiagnostic(
         "op_connect_operation",
         "error",
         { operation: operationName, durationMs: Date.now() - startedAt },
-        error,
+        normalizedError,
       );
-      throw error;
+      throw normalizedError;
     }
   }
 
