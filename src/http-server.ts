@@ -189,6 +189,59 @@ function assertOriginAllowed(
   return allowedOrigins(config, port).has(origin);
 }
 
+function localDefaultHosts(port: number): Set<string> {
+  return new Set([
+    `127.0.0.1:${port}`,
+    `localhost:${port}`,
+    `[::1]:${port}`,
+  ]);
+}
+
+function originHostname(origin: string): string | undefined {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return undefined;
+  }
+}
+
+function allowedHosts(config: ServerConfig, port: number): Set<string> {
+  // The Host header reflects which name the client used to reach us, not
+  // which Origin a browser was running on. Always include the configured
+  // listen address; httpAllowedOrigins adds CORS-trusted hostnames on top.
+  const hosts = new Set<string>();
+  if (isLocalHost(config.httpHost)) {
+    for (const host of localDefaultHosts(port)) {
+      hosts.add(host);
+    }
+  } else {
+    hosts.add(`${config.httpHost}:${port}`.toLowerCase());
+  }
+  for (const origin of config.httpAllowedOrigins) {
+    const host = originHostname(origin);
+    if (host) {
+      hosts.add(host.toLowerCase());
+    }
+  }
+  return hosts;
+}
+
+function assertHostAllowed(
+  config: ServerConfig,
+  request: IncomingMessage,
+  port: number,
+): boolean {
+  // Defense-in-depth against DNS rebinding: the Origin check above only fires
+  // when a browser sets the header. A non-browser client (curl, scripted
+  // attacker) can omit Origin entirely; the Host header is required by
+  // HTTP/1.1 and reflects which name the client used to resolve us.
+  const host = request.headers.host;
+  if (!host || Array.isArray(host)) {
+    return false;
+  }
+  return allowedHosts(config, port).has(host.toLowerCase());
+}
+
 function corsHeaders(
   config: ServerConfig,
   request: IncomingMessage,
@@ -282,6 +335,10 @@ export async function startOnePasswordHttpServer(
       const port = typeof address === "object" && address ? address.port : config.httpPort;
 
       if (!assertOriginAllowed(config, request, port)) {
+        forbiddenResponse(response);
+        return;
+      }
+      if (!assertHostAllowed(config, request, port)) {
         forbiddenResponse(response);
         return;
       }
