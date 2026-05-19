@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -386,6 +387,80 @@ test("HTTP default unrestricted runner reuses the supplied approval manager", as
     assert.match(payload.approvalUrl, /^http:\/\/127\.0\.0\.1:19000\/approve/);
   } finally {
     await client.close();
+    await handle.close();
+  }
+});
+
+function rawHealthGet(
+  url: string,
+  hostHeader: string,
+): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const request = httpRequest(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: parsed.pathname + parsed.search,
+        method: "GET",
+        // Force the Host header before Node fills it from hostname:port — fetch
+        // forbids setting Host, so we drop down to http.request for this test.
+        headers: { host: hostHeader },
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => resolve({ status: response.statusCode ?? 0 }));
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+test("HTTP server rejects requests with mismatched Host header", async () => {
+  // Defense-in-depth against DNS rebinding: a malicious local process can omit
+  // Origin (which the existing check only enforces when present) and reach the
+  // socket on 127.0.0.1 via a rebound DNS name. The Host header reveals which
+  // name was used and must match the configured listen host:port.
+  const config = createConfig();
+  const handle = await startOnePasswordHttpServer(
+    config,
+    {} as OnePasswordService,
+    new MemoryAuditLogger(),
+    new DefaultOpScriptRunner(config),
+  );
+
+  try {
+    const { status } = await rawHealthGet(
+      handle.url.replace("/mcp", "/healthz"),
+      "evil.test",
+    );
+    assert.equal(status, 403);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("HTTP server accepts requests with localhost Host header", async () => {
+  // Sanity check: clients addressing the server as `localhost:<port>` (the
+  // common case for fetch from a local dev tool) must still pass the Host
+  // whitelist after the rebind-protection lands.
+  const config = createConfig();
+  const handle = await startOnePasswordHttpServer(
+    config,
+    {} as OnePasswordService,
+    new MemoryAuditLogger(),
+    new DefaultOpScriptRunner(config),
+  );
+
+  try {
+    const port = new URL(handle.url).port;
+    const { status } = await rawHealthGet(
+      handle.url.replace("/mcp", "/healthz"),
+      `localhost:${port}`,
+    );
+    assert.equal(status, 200);
+  } finally {
     await handle.close();
   }
 });
