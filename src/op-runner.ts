@@ -201,7 +201,10 @@ function redactExactValue(text: string, value: string | undefined): string {
   if (!value) {
     return text;
   }
-  return text.replace(new RegExp(escapeRegExp(value), "g"), "[REDACTED]");
+  // Case-insensitive: `op` and child processes sometimes normalize the casing
+  // of secret values when echoing them (URL hosts, hex tokens). Matches the
+  // /gi pattern used by redactAuthText for OP_SESSION / OP_SERVICE_ACCOUNT_TOKEN.
+  return text.replace(new RegExp(escapeRegExp(value), "gi"), "[REDACTED]");
 }
 
 function redactSecretValues(text: string, values: string[] = []): string {

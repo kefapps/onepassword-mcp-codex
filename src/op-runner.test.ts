@@ -638,6 +638,42 @@ test("script runner injects extra env and redacts supplied secret values", async
   assert.equal(result.errorMessage, "failed [REDACTED]");
 });
 
+test("script runner redacts supplied secret values case-insensitively", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  // The configured secret is "MyAPIKey" but `op` / child processes echo it as
+  // "myapikey" (lower-cased URL host) and "MYAPIKEY" (env-style upper-case).
+  // Both casings must still be redacted.
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "{}\n" }),
+    processResult({
+      stdout: "host=myapikey.region.example\n",
+      stderr: "warn MYAPIKEY exposed\n",
+      errorMessage: "failed MyApiKey check",
+    }),
+  ]);
+  const config = createScriptRunnerConfig(workspace, {
+    opCliAuthMode: "desktop",
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.run(workspace, "deploy", {
+    secretRedactionValues: ["MyAPIKey"],
+  });
+
+  assert.equal(result.stdout, "host=[REDACTED].region.example\n");
+  assert.equal(result.stderr, "warn [REDACTED] exposed\n");
+  assert.equal(result.errorMessage, "failed [REDACTED] check");
+});
+
 test("script run PATH includes configured op directory without command directory prepend", async () => {
   const workspace = await createWorkspace({
     version: 1,
