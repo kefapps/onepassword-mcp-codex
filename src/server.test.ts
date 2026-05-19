@@ -40,7 +40,7 @@ import type {
   ScriptAllowlistReloadResult,
   ScriptAllowlist,
 } from "./op-runner.js";
-import { createOnePasswordMcpServer } from "./server.js";
+import { createOnePasswordMcpServer, sanitizeAuditValue } from "./server.js";
 import type { OnePasswordService } from "./service.js";
 import type {
   UnrestrictedAuthorizationRequired,
@@ -2022,3 +2022,64 @@ test("unrestricted runner returns output with plaintext acknowledgement", async 
 function findPasswordValue(item: Item, fieldId: string): string | undefined {
   return item.fields.find((field) => field.id === fieldId)?.value;
 }
+
+test("sanitizeAuditValue redacts op:// references in deep plain objects", () => {
+  const sanitized = sanitizeAuditValue({
+    reason: "open op://Production/database/password while debugging",
+    nested: {
+      arguments: ["op://Vault/Item/field", "harmless"],
+    },
+  }) as Record<string, unknown>;
+
+  assert.ok(typeof sanitized.reason === "string");
+  assert.ok(!(sanitized.reason as string).includes("op://"));
+  assert.match(sanitized.reason as string, /\[REDACTED_REFERENCE\]/);
+  const nested = sanitized.nested as { arguments: string[] };
+  assert.ok(!nested.arguments[0].includes("op://"));
+});
+
+test("sanitizeAuditValue scrubs non-enumerable properties carrying secrets", () => {
+  // Some SDKs (AWS, undici) stash credentials on non-enumerable own properties
+  // of Error objects. Object.entries skips those keys, leaving the secret in
+  // place on the value that downstream code may still inspect. Reflect.ownKeys
+  // captures and sanitizes them.
+  const obj: Record<string, unknown> = { visible: "harmless" };
+  Object.defineProperty(obj, "hiddenSecret", {
+    value: "OP_SERVICE_ACCOUNT_TOKEN=ops_eyJsecret",
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+
+  const sanitized = sanitizeAuditValue(obj) as Record<string, unknown>;
+  assert.equal(sanitized.visible, "harmless");
+  assert.equal(typeof sanitized.hiddenSecret, "string");
+  assert.ok(!(sanitized.hiddenSecret as string).includes("ops_eyJsecret"));
+  assert.equal(sanitized.hiddenSecret, "OP_SERVICE_ACCOUNT_TOKEN=[REDACTED]");
+});
+
+test("sanitizeAuditValue exposes Error.message / name and redacts them", () => {
+  // Error.message / .name / .stack are non-enumerable own properties — the
+  // previous Object.entries-based implementation silently dropped them. The
+  // new walker should surface them AND scrub op:// / OP_SESSION patterns.
+  const err = new Error("failed at op://Vault/Item/password");
+  err.name = "ConnectError";
+
+  const sanitized = sanitizeAuditValue(err) as Record<string, unknown>;
+  assert.equal(sanitized.name, "ConnectError");
+  assert.equal(typeof sanitized.message, "string");
+  assert.ok(!(sanitized.message as string).includes("op://"));
+  assert.match(sanitized.message as string, /\[REDACTED_REFERENCE\]/);
+});
+
+test("sanitizeAuditValue surfaces Symbol-keyed properties as stringified keys", () => {
+  const tag = Symbol("auth");
+  const obj: Record<PropertyKey, unknown> = { plain: "ok" };
+  obj[tag] = "OP_SESSION_FOO=abc123";
+
+  const sanitized = sanitizeAuditValue(obj) as Record<string, unknown>;
+  assert.equal(sanitized.plain, "ok");
+  const symbolKey = Object.keys(sanitized).find((key) => key.startsWith("Symbol("));
+  assert.ok(symbolKey, "Symbol-keyed property should be present");
+  assert.equal(sanitized[symbolKey as string], "OP_SESSION=[REDACTED]");
+});
