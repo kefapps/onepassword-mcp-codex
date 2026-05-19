@@ -664,6 +664,94 @@ test("connect mode registers only Connect-supported backend tools", async () => 
   assert.deepEqual([...capabilityPayload.effectiveSupportedTools].sort(), [...names].sort());
 });
 
+test("item_search returns partial results when one visible vault fails", async () => {
+  const { client, service } = await createClientAndServer();
+  service.vaultList = async () => [
+    {
+      id: "vault-1",
+      title: "Primary",
+      description: "Main vault",
+      vaultType: VaultType.UserCreated,
+      activeItemCount: 1,
+      contentVersion: 1,
+      attributeVersion: 1,
+      createdAt: new Date("2026-04-21T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-21T00:00:00.000Z"),
+    },
+    {
+      id: "vault-denied",
+      title: "Denied",
+      description: "No access",
+      vaultType: VaultType.UserCreated,
+      activeItemCount: 1,
+      contentVersion: 1,
+      attributeVersion: 1,
+      createdAt: new Date("2026-04-21T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-21T00:00:00.000Z"),
+    },
+  ];
+  service.itemList = async (vaultId: string) => {
+    if (vaultId === "vault-denied") {
+      throw { message: "vault access denied", code: "OP_FORBIDDEN" };
+    }
+    return [
+      {
+        id: "item-1",
+        title: "Root Login",
+        category: ItemCategory.Login,
+        vaultId,
+        websites: [],
+        tags: ["prod"],
+        createdAt: new Date("2026-04-21T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-21T00:00:00.000Z"),
+        state: ItemState.Active,
+      },
+    ];
+  };
+
+  const result = await client.callTool({
+    name: "item_search",
+    arguments: { query: "Root" },
+  });
+  const payload = result.structuredContent as {
+    items: Array<{ id: string }>;
+    searchedVaultCount: number;
+    failedVaultCount: number;
+    partialFailure: boolean;
+    failures: Array<{ vaultId: string; errorMessage: string }>;
+  };
+
+  assert.notEqual(result.isError, true);
+  assert.equal(payload.items.length, 1);
+  assert.equal(payload.searchedVaultCount, 2);
+  assert.equal(payload.failedVaultCount, 1);
+  assert.equal(payload.partialFailure, true);
+  assert.deepEqual(payload.failures, [
+    {
+      vaultId: "vault-denied",
+      errorMessage: "vault access denied (code=OP_FORBIDDEN)",
+    },
+  ]);
+});
+
+test("item_search with an explicit vault reports structured failures clearly", async () => {
+  const { client, service } = await createClientAndServer();
+  service.itemList = async () => {
+    throw { message: "explicit vault access denied", code: "OP_FORBIDDEN" };
+  };
+
+  const result = await client.callTool({
+    name: "item_search",
+    arguments: { vaultId: "vault-denied" },
+  });
+  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+
+  assert.equal(result.isError, true);
+  assert.match(text, /explicit vault access denied/);
+  assert.match(text, /OP_FORBIDDEN/);
+  assert.notEqual(text, "[object Object]");
+});
+
 test("registers script runner tools when enabled", async () => {
   const { client } = await createClientAndServer(false, {
     enableScriptRunner: true,
@@ -992,6 +1080,54 @@ test("password create stores a generated secret and returns redacted metadata", 
   assert.equal(payload.secretLength, 18);
   assert.equal(service.item.title, "Generated Login");
   assert.equal(auditLogger.events.at(-1)?.action, "password_create");
+});
+
+test("write tools return useful messages for structured SDK errors", async () => {
+  const { client, auditLogger, service } = await createClientAndServer(false, {
+    enableWrites: true,
+  });
+  service.itemCreate = async () => {
+    throw { message: "structured SDK create failure", code: "OP_CREATE_FAILED" };
+  };
+
+  const passwordCreate = await client.callTool({
+    name: "password_create",
+    arguments: {
+      vaultId: "vault-1",
+      title: "Broken Login",
+      mode: "random",
+    },
+  });
+  const passwordCreateText =
+    (passwordCreate.content as Array<{ text?: string }>)[0]?.text ?? "";
+
+  assert.equal(passwordCreate.isError, true);
+  assert.match(passwordCreateText, /structured SDK create failure/);
+  assert.match(passwordCreateText, /OP_CREATE_FAILED/);
+  assert.notEqual(passwordCreateText, "[object Object]");
+  assert.equal(
+    auditLogger.events.at(-1)?.errorMessage,
+    "structured SDK create failure (code=OP_CREATE_FAILED)",
+  );
+
+  const itemCreate = await client.callTool({
+    name: "item_create",
+    arguments: {
+      vaultId: "vault-1",
+      category: ItemCategory.Login,
+      title: "Broken Item",
+    },
+  });
+  const itemCreateText = (itemCreate.content as Array<{ text?: string }>)[0]?.text ?? "";
+
+  assert.equal(itemCreate.isError, true);
+  assert.match(itemCreateText, /structured SDK create failure/);
+  assert.match(itemCreateText, /OP_CREATE_FAILED/);
+  assert.notEqual(itemCreateText, "[object Object]");
+  assert.equal(
+    auditLogger.events.at(-1)?.errorMessage,
+    "structured SDK create failure (code=OP_CREATE_FAILED)",
+  );
 });
 
 test("password update can replace a field with a provided password", async () => {

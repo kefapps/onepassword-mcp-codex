@@ -150,6 +150,38 @@ test("HTTP server allows configured origins", async () => {
     });
 
     assert.equal(response.status, 200);
+    assert.equal(response.headers.get("access-control-allow-origin"), "http://trusted.test");
+  } finally {
+    await handle.close();
+  }
+});
+
+test("HTTP MCP endpoint handles CORS preflight for configured origins", async () => {
+  const config = createConfig({
+    httpAllowedOrigins: ["http://trusted.test"],
+  });
+  const handle = await startOnePasswordHttpServer(
+    config,
+    {} as OnePasswordService,
+    new MemoryAuditLogger(),
+    new DefaultOpScriptRunner(config),
+  );
+
+  try {
+    const response = await fetch(handle.url, {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://trusted.test",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "authorization, content-type, mcp-session-id",
+      },
+    });
+
+    assert.equal(response.status, 204);
+    assert.equal(response.headers.get("access-control-allow-origin"), "http://trusted.test");
+    assert.match(response.headers.get("access-control-allow-methods") ?? "", /POST/);
+    assert.match(response.headers.get("access-control-allow-headers") ?? "", /authorization/);
+    assert.match(response.headers.get("access-control-expose-headers") ?? "", /mcp-session-id/);
   } finally {
     await handle.close();
   }

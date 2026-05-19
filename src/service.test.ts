@@ -75,6 +75,34 @@ test("SdkOnePasswordService refreshes the SDK client when 1Password returns inva
   assert.deepEqual(vaults, expectedVaults);
 });
 
+test("SdkOnePasswordService refreshes the SDK client when structured SDK errors report invalid client id", async () => {
+  const expectedVaults = [{ id: "vault-2", title: "Infra" }] as unknown as VaultOverview[];
+  let factoryCalls = 0;
+
+  const staleClient = {
+    vaults: {
+      list: async () => {
+        throw { message: "invalid client id", code: "OP_BAD_CLIENT" };
+      },
+    },
+  } as unknown as Client;
+  const freshClient = {
+    vaults: {
+      list: async () => expectedVaults,
+    },
+  } as unknown as Client;
+
+  const service = new SdkOnePasswordService(createConfig(), async () => {
+    factoryCalls += 1;
+    return factoryCalls === 1 ? staleClient : freshClient;
+  });
+
+  const vaults = await service.vaultList();
+
+  assert.equal(factoryCalls, 2);
+  assert.deepEqual(vaults, expectedVaults);
+});
+
 test("SdkOnePasswordService keeps the original error for non-retryable failures", async () => {
   let factoryCalls = 0;
   const service = new SdkOnePasswordService(createConfig(), async () => {
@@ -90,6 +118,34 @@ test("SdkOnePasswordService keeps the original error for non-retryable failures"
 
   await assert.rejects(() => service.vaultList(), /permission denied/);
   assert.equal(factoryCalls, 1);
+});
+
+test("SdkOnePasswordService normalizes structured non-retryable SDK errors", async () => {
+  const auditLogger = new MemoryAuditLogger();
+  const config = { ...createConfig(), enableDiagnostics: true };
+  const service = new SdkOnePasswordService(
+    config,
+    async () =>
+      ({
+        vaults: {
+          list: async () => {
+            throw { message: "permission denied", code: "OP_FORBIDDEN" };
+          },
+        },
+      }) as unknown as Client,
+    auditLogger,
+  );
+
+  await assert.rejects(() => service.vaultList(), /permission denied/);
+
+  assert(
+    auditLogger.events.some(
+      (event) =>
+        event.action === "op_sdk_operation" &&
+        event.outcome === "error" &&
+        event.errorMessage === "permission denied (code=OP_FORBIDDEN)",
+    ),
+  );
 });
 
 test("SdkOnePasswordService diagnostics record client creation and triggering operation", async () => {

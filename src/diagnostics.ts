@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AuditLogger } from "./audit.js";
 import type { ServerConfig } from "./config.js";
+import { errorMessage } from "./errors.js";
 
 type AuditOutcome = "success" | "error";
 
@@ -21,10 +22,7 @@ function sha256Hash(value: string): string {
 }
 
 function safeErrorMessage(error: unknown): string | undefined {
-  if (!(error instanceof Error)) {
-    return undefined;
-  }
-  return sanitizeDiagnosticString(error.message);
+  return sanitizeDiagnosticString(errorMessage(error));
 }
 
 function sanitizeDiagnosticString(value: string): string {
