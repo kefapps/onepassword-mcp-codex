@@ -289,3 +289,54 @@ test("ConnectOnePasswordService rejects operations outside the Connect POC surfa
     /not supported in Connect mode/,
   );
 });
+
+test("ConnectOnePasswordService rejects references with malformed URI escapes", async () => {
+  // %E0 is the start of a 3-byte UTF-8 sequence without continuation bytes —
+  // decodeURIComponent throws URIError. The wrapper must surface a typed
+  // Error so callers get a consistent failure mode.
+  const service = new ConnectOnePasswordService(
+    createConfig(),
+    async () => new FakeConnectClient(),
+  );
+
+  await assert.rejects(
+    () => service.secretResolve("op://Engineering/Database/api-token%E0"),
+    /Invalid 1Password secret reference segment/,
+  );
+});
+
+test("ConnectOnePasswordService matches field titles across Unicode normalization forms", async () => {
+  // Field label is in NFC (single precomposed `é`); query uses NFD (e + combining
+  // acute). Without `.normalize("NFC")` the equality check would falsely fail.
+  const nfcLabel = "café"; // U+00E9
+  const nfdQuery = "café"; // e + U+0301
+  assert.notEqual(nfcLabel, nfdQuery);
+
+  class UnicodeConnectClient extends FakeConnectClient {
+    public override async getItem(_vaultId: string, _itemQuery: string): Promise<unknown> {
+      return {
+        id: "item-1",
+        title: "Database",
+        category: "LOGIN",
+        vault: { id: "vault-1" },
+        tags: [],
+        urls: [],
+        version: 1,
+        createdAt: new Date("2026-05-01T10:00:00.000Z"),
+        updatedAt: new Date("2026-05-01T10:00:00.000Z"),
+        sections: [],
+        fields: [{ id: "fld-1", label: nfcLabel, value: "espresso" }],
+      };
+    }
+  }
+
+  const service = new ConnectOnePasswordService(
+    createConfig(),
+    async () => new UnicodeConnectClient(),
+  );
+
+  const value = await service.secretResolve(
+    `op://Engineering/Database/${encodeURIComponent(nfdQuery)}`,
+  );
+  assert.equal(value, "espresso");
+});
