@@ -464,3 +464,54 @@ test("HTTP server accepts requests with localhost Host header", async () => {
     await handle.close();
   }
 });
+
+test("HTTP server accepts arbitrary Host on wildcard bind without allowlist", async () => {
+  // Operators binding to 0.0.0.0 expose the service over arbitrary DNS names
+  // and IPs. The wildcard literal is never what clients send, so the Host
+  // check has to fall back to "accept anything" — otherwise standard HTTP
+  // transport (curl, the SDK pointed at a load balancer hostname) breaks.
+  const config = createConfig({ httpHost: "0.0.0.0" });
+  const handle = await startOnePasswordHttpServer(
+    config,
+    {} as OnePasswordService,
+    new MemoryAuditLogger(),
+    new DefaultOpScriptRunner(config),
+  );
+
+  try {
+    const port = new URL(handle.url).port;
+    const url = `http://127.0.0.1:${port}/healthz`;
+    const { status } = await rawHealthGet(url, `mcp.example.test:${port}`);
+    assert.equal(status, 200);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("HTTP server pins Host to allowlist on wildcard bind when origins are configured", async () => {
+  // When the operator pairs a wildcard bind with an explicit
+  // httpAllowedOrigins list, treat that list as the authoritative Host
+  // allowlist. Requests with a Host outside the list are rejected; matching
+  // hosts pass. This is the opt-in defense-in-depth path under wildcard bind.
+  const config = createConfig({
+    httpHost: "0.0.0.0",
+    httpAllowedOrigins: ["https://mcp.example.test"],
+  });
+  const handle = await startOnePasswordHttpServer(
+    config,
+    {} as OnePasswordService,
+    new MemoryAuditLogger(),
+    new DefaultOpScriptRunner(config),
+  );
+
+  try {
+    const port = new URL(handle.url).port;
+    const url = `http://127.0.0.1:${port}/healthz`;
+    const ok = await rawHealthGet(url, "mcp.example.test");
+    assert.equal(ok.status, 200);
+    const denied = await rawHealthGet(url, "evil.test");
+    assert.equal(denied.status, 403);
+  } finally {
+    await handle.close();
+  }
+});
