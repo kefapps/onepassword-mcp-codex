@@ -167,6 +167,13 @@ function isLocalHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
+function isWildcardBind(host: string): boolean {
+  // Listening on a wildcard address means the configured host name is just
+  // "any interface" — it is never what clients put in the Host header. They
+  // reach us via the service's real DNS name or one of the machine's IPs.
+  return host === "" || host === "0.0.0.0" || host === "::" || host === "::0" || host === "*";
+}
+
 function allowedOrigins(config: ServerConfig, port: number): Set<string> {
   if (config.httpAllowedOrigins.length > 0) {
     return new Set(config.httpAllowedOrigins);
@@ -209,12 +216,14 @@ function allowedHosts(config: ServerConfig, port: number): Set<string> {
   // The Host header reflects which name the client used to reach us, not
   // which Origin a browser was running on. Always include the configured
   // listen address; httpAllowedOrigins adds CORS-trusted hostnames on top.
+  // Wildcard binds (0.0.0.0, ::) are skipped here — the wildcard literal is
+  // never what a real client sends; see assertHostAllowed for that path.
   const hosts = new Set<string>();
   if (isLocalHost(config.httpHost)) {
     for (const host of localDefaultHosts(port)) {
       hosts.add(host);
     }
-  } else {
+  } else if (!isWildcardBind(config.httpHost)) {
     hosts.add(`${config.httpHost}:${port}`.toLowerCase());
   }
   for (const origin of config.httpAllowedOrigins) {
@@ -238,6 +247,14 @@ function assertHostAllowed(
   const host = request.headers.host;
   if (!host || Array.isArray(host)) {
     return false;
+  }
+  // Wildcard binds (0.0.0.0, ::) carry no hint about what hostname clients
+  // should use; with no operator-supplied allowlist we cannot tell legitimate
+  // traffic from a rebind. Fall back to "accept any Host" so the standard
+  // HTTP transport behaviour stays intact; operators who want strict Host
+  // pinning under a wildcard bind enumerate hostnames via httpAllowedOrigins.
+  if (isWildcardBind(config.httpHost) && config.httpAllowedOrigins.length === 0) {
+    return true;
   }
   return allowedHosts(config, port).has(host.toLowerCase());
 }
