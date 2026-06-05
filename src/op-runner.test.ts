@@ -255,10 +255,47 @@ test("DefaultOpScriptRunner matches allowlist for sibling workspace root prefixe
   assert.equal(allowlist.workspaceRootMatch, "prefix");
   assert.equal(result.workspaceRoot, resolvedSiblingWorkspace);
   assert.equal(commandCall?.cwd, resolvedSiblingWorkspace);
-  await assert.rejects(
-    () => runner.list(unrelatedWorkspace),
-    /does not have a startup-configured script allowlist/,
+  await assert.rejects(async () => {
+    await runner.list(unrelatedWorkspace);
+  }, (error) => {
+    assert(error instanceof Error);
+    assert.match(error.message, /does not have a startup-configured script allowlist/);
+    assert.match(error.message, /mcp-1password trust-workspace/);
+    assert.match(error.message, new RegExp(unrelatedWorkspace.replaceAll("/", "\\/")));
+    assert.match(error.message, /--script-runner-allowlist-manifest/);
+    return true;
+  });
+
+  const connectRunner = new DefaultOpScriptRunner(
+    {
+      ...config,
+      authMode: "connect",
+      connectHost: "http://127.0.0.1:8080",
+      connectToken: "connect-token",
+      connectTimeoutMs: 30_000,
+    },
+    sessionManager,
+    processRunner,
   );
+  const previousArgvEntryPoint = process.argv[1];
+  process.argv[1] = "/tmp/dist/connect-index.js";
+  try {
+    await assert.rejects(async () => {
+      await connectRunner.list(unrelatedWorkspace);
+    }, (error) => {
+      assert(error instanceof Error);
+      assert.match(
+        error.message,
+        new RegExp(
+          `${process.execPath.replaceAll("/", "\\/")} \\/tmp\\/dist\\/connect-index\\.js trust-workspace`,
+        ),
+      );
+      assert.match(error.message, /workspace_trust_reload/);
+      return true;
+    });
+  } finally {
+    process.argv[1] = previousArgvEntryPoint;
+  }
 });
 
 test("DefaultOpScriptRunner runs workspace commands from scoped workspace trust in connect mode", async () => {

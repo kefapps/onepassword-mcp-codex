@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants, readFileSync, realpathSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { ServerConfig } from "./config.js";
 
@@ -9,6 +10,11 @@ export const SCRIPT_ALLOWLIST_FILENAME = ".onepassword-mcp.json";
 export const DEFAULT_SCRIPT_TIMEOUT_MS = 600_000;
 export const DEFAULT_PROCESS_TIMEOUT_MS = 30_000;
 export const DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024;
+const DEFAULT_WORKSPACE_TRUST_MANIFEST_PATH = join(
+  homedir(),
+  ".onepassword-mcp",
+  "workspace-trust.json",
+);
 const FORCE_KILL_GRACE_MS = 1_000;
 
 export type ResolvedOpCliAuthMode =
@@ -263,6 +269,67 @@ function resolveAuthMode(config: ServerConfig): ResolvedOpCliAuthMode {
   }
 
   return config.opCliAuthMode;
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function scriptListReloadToolName(config: ServerConfig): string {
+  return config.authMode === "connect"
+    ? "workspace_trust_reload"
+    : "op_script_reload_allowlists";
+}
+
+function trustWorkspaceBinaryName(config: ServerConfig): string {
+  return config.authMode === "connect" ? "mcp-1password-connect" : "mcp-1password";
+}
+
+function currentTrustWorkspaceCliInvocation(config: ServerConfig): string {
+  const entryPoint = process.argv[1];
+  if (!entryPoint || !isAbsolute(entryPoint)) {
+    return trustWorkspaceBinaryName(config);
+  }
+
+  const entryPointName = entryPoint.split(/[\\/]/).at(-1);
+  const connectEntryPoints = new Set(["connect-index.js", "mcp-1password-connect"]);
+  const defaultEntryPoints = new Set(["index.js", "mcp-1password"]);
+  const expectedEntryPoints =
+    config.authMode === "connect" ? connectEntryPoints : defaultEntryPoints;
+  if (!entryPointName || !expectedEntryPoints.has(entryPointName)) {
+    return trustWorkspaceBinaryName(config);
+  }
+
+  return `${shellQuote(process.execPath)} ${shellQuote(entryPoint)}`;
+}
+
+function missingAllowlistMessage(
+  resolvedWorkspaceRoot: string,
+  config: ServerConfig,
+): string {
+  const manifestPath =
+    config.scriptRunnerAllowlistManifestPaths[0] ??
+    DEFAULT_WORKSPACE_TRUST_MANIFEST_PATH;
+  const command = `${currentTrustWorkspaceCliInvocation(config)} trust-workspace ${shellQuote(
+    resolvedWorkspaceRoot,
+  )} --manifest=${shellQuote(manifestPath)}`;
+  const reloadTool = scriptListReloadToolName(config);
+  const reloadInstruction =
+    config.scriptRunnerAllowlistManifestPaths.length > 0
+      ? `Then call ${reloadTool} in this MCP session.`
+      : `This MCP process was started without --script-runner-allowlist-manifest. Add --script-runner-allowlist-manifest=${shellQuote(
+          manifestPath,
+        )} to the MCP startup config and restart it; future trust changes can then be loaded with ${reloadTool}.`;
+
+  return [
+    `Workspace ${resolvedWorkspaceRoot} does not have a startup-configured script allowlist.`,
+    "To trust this workspace, run:",
+    `  ${command}`,
+    reloadInstruction,
+  ].join("\n");
 }
 
 function isDeterministicOpAuthFailure(result: ProcessRunResult): boolean {
@@ -763,9 +830,7 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
       matchesWorkspaceRoot(candidate, resolvedWorkspaceRoot),
     );
     if (!allowlist) {
-      throw new Error(
-        `Workspace ${resolvedWorkspaceRoot} does not have a startup-configured script allowlist.`,
-      );
+      throw new Error(missingAllowlistMessage(resolvedWorkspaceRoot, this.config));
     }
 
     return {
