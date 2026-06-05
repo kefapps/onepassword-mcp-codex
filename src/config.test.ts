@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseConfig } from "./config.js";
+import { parseConfig, parseConnectOnlyConfig } from "./config.js";
 import { UNRESTRICTED_RUNNER_ACK } from "./constants.js";
 
 const ENV_KEYS = [
+  "OP_MCP_AUTH_MODE",
   "OP_MCP_ACCOUNT",
   "OP_SERVICE_ACCOUNT_TOKEN",
   "OP_MCP_SERVICE_ACCOUNT_TOKEN",
@@ -33,6 +34,7 @@ const ENV_KEYS = [
   "OP_MCP_APPROVAL_REMEMBER_KEY_PATH",
   "OP_MCP_APPROVAL_REMEMBER_TTL_MS",
   "OP_MCP_ACKNOWLEDGE_UNRESTRICTED_RUNNER",
+  "OP_MCP_OP_CLI_AUTH_MODE",
   "OP_MCP_DIAGNOSTICS",
 ] as const;
 
@@ -111,6 +113,72 @@ test("parseConfig accepts local Connect auth mode", () => {
     assert.equal(config.connectTimeoutMs, 30_000);
     assert.equal(config.account, undefined);
     assert.equal(config.serviceAccountToken, undefined);
+  });
+});
+
+test("parseConnectOnlyConfig defaults to Connect auth", () => {
+  withCleanAuthEnv(() => {
+    process.env.OP_CONNECT_TOKEN = "connect-token";
+
+    const config = parseConnectOnlyConfig([], "0.1.0");
+
+    assert.equal(config.authMode, "connect");
+    assert.equal(config.connectHost, "http://127.0.0.1:8080");
+    assert.equal(config.connectToken, "connect-token");
+    assert.equal(config.account, undefined);
+    assert.equal(config.serviceAccountToken, undefined);
+    assert.equal(config.opCliAuthMode, "auto");
+  });
+});
+
+test("parseConnectOnlyConfig rejects non-Connect auth modes", () => {
+  withCleanAuthEnv(() => {
+    process.env.OP_CONNECT_TOKEN = "connect-token";
+
+    assert.throws(
+      () => parseConnectOnlyConfig(["--auth-mode=desktop"], "0.1.0"),
+      /Connect-only.*auth-mode=connect/,
+    );
+
+    process.env.OP_MCP_AUTH_MODE = "service-account";
+    assert.throws(
+      () => parseConnectOnlyConfig([], "0.1.0"),
+      /Connect-only.*auth-mode=connect/,
+    );
+  });
+});
+
+test("parseConnectOnlyConfig rejects op CLI auth modes", () => {
+  withCleanAuthEnv(() => {
+    process.env.OP_CONNECT_TOKEN = "connect-token";
+
+    assert.throws(
+      () => parseConnectOnlyConfig(["--op-cli-auth-mode=manual-session"], "0.1.0"),
+      /Connect-only.*op-cli-auth-mode=auto/,
+    );
+
+    process.env.OP_MCP_OP_CLI_AUTH_MODE = "service-account";
+    assert.throws(
+      () => parseConnectOnlyConfig([], "0.1.0"),
+      /Connect-only.*op-cli-auth-mode=auto/,
+    );
+  });
+});
+
+test("parseConnectOnlyConfig rejects legacy unrestricted runner", () => {
+  withCleanAuthEnv(() => {
+    process.env.OP_CONNECT_TOKEN = "connect-token";
+
+    assert.throws(
+      () => parseConnectOnlyConfig(["--enable-unrestricted-runner=true"], "0.1.0"),
+      /Connect-only.*op_unrestricted_run/,
+    );
+
+    process.env.OP_MCP_ENABLE_UNRESTRICTED_RUNNER = "true";
+    assert.throws(
+      () => parseConnectOnlyConfig([], "0.1.0"),
+      /Connect-only.*op_unrestricted_run/,
+    );
   });
 });
 
@@ -228,6 +296,58 @@ test("parseConfig requires absolute op path when script runner is enabled", () =
         "0.1.0",
       ),
     /op-cli-path/,
+  );
+});
+
+test("parseConfig accepts connect-backed script runner without op CLI auth", () => {
+  const config = parseConfig(
+    [
+      "--auth-mode=connect",
+      "--connect-host=http://127.0.0.1:8080",
+      "--connect-token=connect-token",
+      "--enable-script-runner=true",
+      "--script-runner-root=/tmp",
+      "--script-runner-allowlist=/tmp/.onepassword-mcp.json",
+    ],
+    "0.1.0",
+  );
+
+  assert.equal(config.authMode, "connect");
+  assert.equal(config.enableScriptRunner, true);
+  assert.equal(config.account, undefined);
+  assert.equal(config.opCliAuthMode, "auto");
+});
+
+test("parseConfig rejects Connect with explicit op CLI auth modes", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--auth-mode=connect",
+          "--connect-token=[REDACTED:API key param]",
+          "--enable-script-runner=true",
+          "--script-runner-root=/tmp",
+          "--script-runner-allowlist=/tmp/.onepassword-mcp.json",
+          "--op-cli-auth-mode=manual-session",
+        ],
+        "0.1.0",
+      ),
+    /Connect auth requires op-cli-auth-mode=auto/,
+  );
+});
+
+test("parseConfig rejects unrestricted script runner in Connect mode", () => {
+  assert.throws(
+    () =>
+      parseConfig(
+        [
+          "--auth-mode=connect",
+          "--connect-token=[REDACTED:API key param]",
+          "--enable-unrestricted-script-runner=true",
+        ],
+        "0.1.0",
+      ),
+    /Connect auth does not support unrestricted script runner/,
   );
 });
 

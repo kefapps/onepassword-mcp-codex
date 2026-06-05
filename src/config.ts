@@ -273,8 +273,11 @@ function parseConnectHost(value: string | undefined): string {
 function resolveScriptRunnerAuthMode(
   authMode: AuthMode,
   opCliAuthMode: OpCliAuthMode,
-): Exclude<OpCliAuthMode, "auto"> {
+): Exclude<OpCliAuthMode, "auto"> | "connect" {
   if (opCliAuthMode === "auto") {
+    if (authMode === "connect") {
+      return "connect";
+    }
     return authMode === "service-account" ? "service-account" : "manual-session";
   }
 
@@ -297,6 +300,10 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     throw new HelpError(
       [
         "Usage: mcp-1password [options]",
+        "       mcp-1password trust-workspace [workspacePath] [options]",
+        "",
+        "Subcommands:",
+        "  trust-workspace  Add the current project to the Connect workspace trust manifest",
         "",
         "Options:",
         "  --auth-mode=desktop|service-account|connect",
@@ -424,6 +431,11 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         process.env.OP_MCP_ENABLE_SCRIPT_RUNNER,
       false,
     );
+  if (authMode === "connect" && enableUnrestrictedScriptRunner) {
+    throw new Error(
+      "Connect auth does not support unrestricted script runner mode. Use workspace trust with --enable-script-runner=true instead.",
+    );
+  }
   const scriptRunnerRoots = [
     ...readFlagValues(argv, "script-runner-root"),
     ...parsePathList(
@@ -511,6 +523,11 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
   const opCliAuthMode = parseOpCliAuthMode(
     readFlagValue(argv, "op-cli-auth-mode") ?? process.env.OP_MCP_OP_CLI_AUTH_MODE,
   );
+  if (authMode === "connect" && opCliAuthMode !== "auto") {
+    throw new Error(
+      "Connect auth requires op-cli-auth-mode=auto so workspace command secrets are resolved through Connect, not the op CLI.",
+    );
+  }
   const transport = parseTransportMode(
     readFlagValue(argv, "transport") ?? process.env.OP_MCP_TRANSPORT,
   );
@@ -597,12 +614,12 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         );
       }
     }
-    if (!isAbsolute(opCliPath)) {
+    const scriptRunnerAuthMode = resolveScriptRunnerAuthMode(authMode, opCliAuthMode);
+    if (scriptRunnerAuthMode !== "connect" && !isAbsolute(opCliPath)) {
       throw new Error(
-        "Script runner requires --op-cli-path to be an absolute path.",
+        "Script runner requires --op-cli-path to be an absolute path when using op CLI auth.",
       );
     }
-    const scriptRunnerAuthMode = resolveScriptRunnerAuthMode(authMode, opCliAuthMode);
     if (
       (scriptRunnerAuthMode === "desktop" ||
         scriptRunnerAuthMode === "manual-session") &&
@@ -720,4 +737,85 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
     integrationName: "1Password MCP",
     integrationVersion: packageVersion,
   };
+}
+
+export function parseConnectOnlyConfig(
+  argv: string[],
+  packageVersion: string,
+): ServerConfig {
+  if (argv.includes("-h") || hasFlag(argv, "help")) {
+    throw new HelpError(
+      [
+        "Usage: mcp-1password-connect [options]",
+        "",
+        "Connect-only 1Password MCP server. Desktop and service-account auth are not available.",
+        "",
+        "Options:",
+        "  --connect-host=<http://127.0.0.1:8080>",
+        "  --connect-token=[REDACTED:API key param]",
+        "  --connect-timeout-ms=<milliseconds>",
+        "  --enable-secret-reveal=true|false",
+        "  --enable-writes=true|false",
+        "  --enable-destructive-actions=true|false",
+        "  --enable-script-runner=true|false",
+        "  --script-runner-root=<absolute trusted root> (repeatable)",
+        "  --script-runner-allowlist=<absolute workspace trust file> (repeatable)",
+        "  --script-runner-allowlist-manifest=<absolute workspace trust manifest> (repeatable)",
+        "  --transport=stdio|http",
+        "  --http-host=<host>",
+        "  --http-port=<port>",
+        "  --http-path=<path>",
+        "  --http-require-bearer=true|false",
+        "  --http-allowed-origin=<origin> (repeatable)",
+        "  --audit-log-path=<path>",
+        "  --diagnostics=true|false",
+        "  --log-level=debug|info|warn|error",
+      ].join("\n"),
+    );
+  }
+
+  const requestedAuthMode =
+    readFlagValue(argv, "auth-mode") ?? process.env.OP_MCP_AUTH_MODE;
+  if (requestedAuthMode !== undefined && requestedAuthMode !== "connect") {
+    throw new Error(
+      "Connect-only server only supports auth-mode=connect. Remove the non-Connect auth mode.",
+    );
+  }
+
+  const requestedOpCliAuthMode =
+    readFlagValue(argv, "op-cli-auth-mode") ?? process.env.OP_MCP_OP_CLI_AUTH_MODE;
+  if (
+    requestedOpCliAuthMode !== undefined &&
+    requestedOpCliAuthMode !== "auto"
+  ) {
+    throw new Error(
+      "Connect-only server only supports op-cli-auth-mode=auto so script secrets are resolved through Connect.",
+    );
+  }
+
+  const requestedUnrestrictedRunner =
+    readFlagValue(argv, "enable-unrestricted-runner") ??
+    process.env.OP_MCP_ENABLE_UNRESTRICTED_RUNNER;
+  if (parseBoolean(requestedUnrestrictedRunner, false)) {
+    throw new Error(
+      "Connect-only server does not expose op_unrestricted_run. Use the Connect script runner with workspace trust instead.",
+    );
+  }
+
+  return parseConfig(
+    [
+      "--auth-mode=connect",
+      "--op-cli-auth-mode=auto",
+      ...argv.filter(
+        (arg, index) =>
+          arg !== "--auth-mode" &&
+          !arg.startsWith("--auth-mode=") &&
+          !(index > 0 && argv[index - 1] === "--auth-mode") &&
+          arg !== "--op-cli-auth-mode" &&
+          !arg.startsWith("--op-cli-auth-mode=") &&
+          !(index > 0 && argv[index - 1] === "--op-cli-auth-mode"),
+      ),
+    ],
+    packageVersion,
+  );
 }

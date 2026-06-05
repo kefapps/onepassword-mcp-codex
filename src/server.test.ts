@@ -265,6 +265,7 @@ class FakeOpScriptRunner implements OpScriptRunner {
   public readonly allowlist: ScriptAllowlist = {
     path: "/workspace/.onepassword-mcp.json",
     workspaceRoot: "/workspace",
+    allowWorkspaceCommands: false,
     commands: [
       {
         id: "deploy",
@@ -775,6 +776,55 @@ test("registers script runner tools when enabled", async () => {
   assert.match(secretRevealTool?.description ?? "", /envSecretRefs/);
 });
 
+test("connect script runner exposes workspace tools without op tools", async () => {
+  const { client } = await createClientAndServer(false, {
+    authMode: "connect",
+    enableScriptRunner: true,
+    scriptRunner: new FakeOpScriptRunner(),
+  });
+  const tools = await client.listTools();
+  const names = new Set(tools.tools.map((tool) => tool.name));
+  const workspaceCommandTool = tools.tools.find(
+    (tool) => tool.name === "workspace_command_run",
+  );
+  const secretRevealTool = tools.tools.find((tool) => tool.name === "secret_reveal");
+  const capabilities = await client.callTool({
+    name: "sdk_capabilities",
+    arguments: {},
+  });
+  const capabilityPayload = capabilities.structuredContent as {
+    effectiveSupportedTools: string[];
+    secretConsumptionGuidance: { preferredPath: string; nextStep: string };
+  };
+
+  assert(names.has("workspace_trust_list"));
+  assert(names.has("workspace_command_run"));
+  assert(names.has("workspace_trust_reload"));
+  assert(!names.has("op_script_list"));
+  assert(!names.has("op_script_run"));
+  assert(!names.has("op_script_reload_allowlists"));
+  assert(!names.has("op_session_status"));
+  assert(!names.has("op_session_reset"));
+  assert(!names.has("op_unrestricted_run"));
+  assert.match(workspaceCommandTool?.description ?? "", /Connect/);
+  assert.match(workspaceCommandTool?.description ?? "", /op:\/\/ references/);
+  assert.doesNotMatch(workspaceCommandTool?.description ?? "", /op_script_run/);
+  assert.match(secretRevealTool?.description ?? "", /workspace_command_run/);
+  assert.doesNotMatch(secretRevealTool?.description ?? "", /op_script_run/);
+  assert.equal(
+    capabilityPayload.secretConsumptionGuidance.preferredPath,
+    "workspace_command_run",
+  );
+  assert.match(
+    capabilityPayload.secretConsumptionGuidance.nextStep,
+    /workspace_trust_list/,
+  );
+  assert.deepEqual(
+    [...capabilityPayload.effectiveSupportedTools].sort(),
+    tools.tools.map((tool) => tool.name).sort(),
+  );
+});
+
 test("registers unrestricted runner tool only when enabled", async () => {
   const { client } = await createClientAndServer(false, {
     enableUnrestrictedRunner: true,
@@ -837,19 +887,21 @@ test("op_session_status exposes runtime gates when script runner is disabled", a
   assert.equal(payload.unrestrictedRunner.configuredRootCount, 0);
 });
 
-test("op_session_status reports active Connect backend", async () => {
+test("sdk_capabilities reports active Connect backend without op session tools", async () => {
   const { client } = await createClientAndServer(false, { authMode: "connect" });
-  const status = await client.callTool({
-    name: "op_session_status",
+  const capabilities = await client.callTool({
+    name: "sdk_capabilities",
     arguments: {},
   });
-  const payload = status.structuredContent as {
+  const payload = capabilities.structuredContent as {
     backend: string;
-    diagnostics: { backend: string };
+    authMode: string;
+    effectiveSupportedTools: string[];
   };
 
+  assert.equal(payload.authMode, "connect");
   assert.equal(payload.backend, "connect");
-  assert.equal(payload.diagnostics.backend, "connect");
+  assert(!payload.effectiveSupportedTools.includes("op_session_status"));
 });
 
 test("registers prompts and resources", async () => {
@@ -1490,6 +1542,88 @@ test("script runner lists and runs allowlisted commands with audit", async () =>
   assert.equal(auditLogger.events.at(-1)?.outcome, "success");
 });
 
+test("workspace command runner resolves op references in connect mode", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  (scriptRunner.allowlist as ScriptAllowlist & { allowWorkspaceCommands: boolean })
+    .allowWorkspaceCommands = true;
+  scriptRunner.nextStdout = "connected with supabase-db-password-secret\n";
+  const { client, auditLogger, service } = await createClientAndServer(false, {
+    authMode: "connect",
+    enableScriptRunner: true,
+    scriptRunner,
+  });
+
+  const listed = await client.callTool({
+    name: "workspace_trust_list",
+    arguments: {
+      workspaceRoot: "/workspace",
+    },
+  });
+  const listPayload = listed.structuredContent as {
+    allowWorkspaceCommands?: boolean;
+    workspaceCommandResolution: {
+      mode: string;
+      requestedWorkspaceRoot: string;
+      resolvedWorkspaceRoot: string;
+      match: string;
+      freeformCommands: boolean;
+      secretInjection: string;
+    };
+  };
+  assert.equal(listPayload.allowWorkspaceCommands, undefined);
+  assert.equal(listPayload.workspaceCommandResolution.mode, "connect");
+  assert.equal(
+    listPayload.workspaceCommandResolution.requestedWorkspaceRoot,
+    "/workspace",
+  );
+  assert.equal(
+    listPayload.workspaceCommandResolution.resolvedWorkspaceRoot,
+    "/workspace",
+  );
+  assert.equal(listPayload.workspaceCommandResolution.match, "exact");
+  assert.equal(listPayload.workspaceCommandResolution.freeformCommands, true);
+  assert.equal(
+    listPayload.workspaceCommandResolution.secretInjection,
+    "child-process-env",
+  );
+
+  const result = await client.callTool({
+    name: "workspace_command_run",
+    arguments: {
+      workspaceRoot: "/workspace/android-context",
+      command: "npm run db:migrate:dev",
+      reason: "Need to run Android Context migration with injected secrets",
+      envSecretRefs: {
+        SUPABASE_DB_PASSWORD: "op://vault/supabase-db-password/password",
+      },
+      returnOutput: true,
+      acknowledgePlaintext: SECRET_REVEAL_ACK,
+    },
+  });
+  const payload = result.structuredContent as {
+    mode: string;
+    stdout: string;
+    commandHash: string;
+    outputReturned: boolean;
+    envSecretRefCount: number;
+    injectedSecretEnvVars: string[];
+  };
+  const auditPayload = JSON.stringify(auditLogger.events.at(-1));
+
+  assert.equal(result.isError, false);
+  assert.equal(payload.mode, "workspace-commands");
+  assert.equal(payload.outputReturned, true);
+  assert.equal(payload.stdout, "connected with [REDACTED]\n");
+  assert.match(payload.commandHash, /^[a-f0-9]{64}$/);
+  assert.equal(payload.envSecretRefCount, 1);
+  assert.deepEqual(payload.injectedSecretEnvVars, ["SUPABASE_DB_PASSWORD"]);
+  assert.equal(scriptRunner.lastRunOptions?.extraEnv?.SUPABASE_DB_PASSWORD, "supabase-db-password-secret");
+  assert.equal(service.secretResolveCalls.length, 1);
+  assert.equal(auditLogger.events.at(-1)?.action, "workspace_command_run");
+  assert(!auditPayload.includes("npm run db:migrate:dev"));
+  assert(!auditPayload.includes("supabase-db-password-secret"));
+});
+
 test("script runner reloads allowlists with audit", async () => {
   const scriptRunner = new FakeOpScriptRunner();
   const { client, auditLogger } = await createClientAndServer(false, {
@@ -1527,6 +1661,42 @@ test("script runner reloads allowlists with audit", async () => {
     auditEvent?.metadata.reason,
     "Need to pick up an edited allowlist file",
   );
+});
+
+test("connect workspace trust reload uses workspace tool name and audit action", async () => {
+  const scriptRunner = new FakeOpScriptRunner();
+  const { client, auditLogger } = await createClientAndServer(false, {
+    authMode: "connect",
+    enableScriptRunner: true,
+    scriptRunner,
+  });
+
+  const result = await client.callTool({
+    name: "workspace_trust_reload",
+    arguments: {
+      reason: "Need to pick up an edited workspace trust file",
+    },
+  });
+  const payload = result.structuredContent as {
+    reloaded: boolean;
+    configuredAllowlistPathCount: number;
+    configuredAllowlistManifestCount: number;
+    previousAllowlistCount: number;
+    allowlistCount: number;
+    commandCount: number;
+  };
+  const auditEvent = auditLogger.events.at(-1);
+
+  assert.notEqual(result.isError, true);
+  assert.equal(scriptRunner.reloadCalls, 1);
+  assert.equal(payload.reloaded, true);
+  assert.equal(payload.configuredAllowlistPathCount, 1);
+  assert.equal(payload.configuredAllowlistManifestCount, 0);
+  assert.equal(payload.previousAllowlistCount, 1);
+  assert.equal(payload.allowlistCount, 1);
+  assert.equal(payload.commandCount, 2);
+  assert.equal(auditEvent?.action, "workspace_trust_reload");
+  assert.equal(auditEvent?.outcome, "success");
 });
 
 test("script runner audits failed allowlist reloads", async () => {

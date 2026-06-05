@@ -43,6 +43,7 @@ import {
   type AllowlistedCommand,
   type OpScriptCommandRunResult,
   type OpScriptRunner,
+  type ScriptAllowlist,
 } from "./op-runner.js";
 import {
   type PasswordMode,
@@ -108,11 +109,67 @@ const reservedScriptEnvKeys = new Set([
   "OP_SESSION",
   "OP_SERVICE_ACCOUNT_TOKEN",
 ]);
-const SCRIPT_RUNNER_SECRET_HINT =
-  "When a secret is needed only by a command or local script, prefer op_script_run with envSecretRefs so the secret is injected into the child process and never returned in plaintext.";
 const UNRESTRICTED_SCRIPT_RUNNER_SCOPE = "unrestricted-script-runner-session";
 
 const envSecretRefsSchema = z.record(z.string().min(1), z.string().min(1));
+
+function scriptRunnerToolName(config: ServerConfig): "workspace_command_run" | "op_script_run" {
+  return config.authMode === "connect" ? "workspace_command_run" : "op_script_run";
+}
+
+function scriptListToolName(config: ServerConfig): "workspace_trust_list" | "op_script_list" {
+  return config.authMode === "connect" ? "workspace_trust_list" : "op_script_list";
+}
+
+function scriptReloadToolName(
+  config: ServerConfig,
+): "workspace_trust_reload" | "op_script_reload_allowlists" {
+  return config.authMode === "connect"
+    ? "workspace_trust_reload"
+    : "op_script_reload_allowlists";
+}
+
+function scriptRunnerSecretHint(config: ServerConfig): string {
+  if (config.authMode === "connect") {
+    return "When a secret is needed only by a command or local script, prefer workspace_command_run with envSecretRefs so op:// references are resolved through 1Password Connect, injected into the child process, and never returned in plaintext. This path does not use the op binary, OP_SESSION, or Desktop SDK auth.";
+  }
+
+  return "When a secret is needed only by a command or local script, prefer op_script_run with envSecretRefs so the secret is injected into the child process and never returned in plaintext.";
+}
+
+function scriptListContent(
+  config: ServerConfig,
+  allowlist: ScriptAllowlist,
+  requestedWorkspaceRoot: string,
+): Record<string, unknown> {
+  if (config.authMode === "connect") {
+    const freeformCommands =
+      config.opCliAuthMode === "auto" && allowlist.allowWorkspaceCommands;
+    return {
+      trustConfigPath: allowlist.path,
+      workspaceRoot: allowlist.workspaceRoot,
+      workspaceCommandResolution: {
+        mode: "connect",
+        requestedWorkspaceRoot,
+        resolvedWorkspaceRoot: allowlist.workspaceRoot,
+        match: allowlist.workspaceRootMatch ?? "exact",
+        freeformCommands,
+        commandInput: freeformCommands ? "command" : "commandId",
+        secretInjection: "child-process-env",
+        output: "withheld-by-default",
+      },
+      commands: allowlist.commands,
+    };
+  }
+
+  return {
+    path: allowlist.path,
+    workspaceRoot: allowlist.workspaceRoot,
+    allowWorkspaceCommands: allowlist.allowWorkspaceCommands,
+    commands: allowlist.commands,
+  };
+}
+
 const passwordReadInputShape = {
   secretReference: z.string().min(1).optional(),
   vaultId: z.string().min(1).optional(),
@@ -295,7 +352,7 @@ function matchesQuery(item: object, query?: string) {
 function assertSecretRevealEnabled(config: ServerConfig): void {
   if (!config.enableSecretReveal) {
     throw new Error(
-      `Plaintext secret reveal is disabled. ${SCRIPT_RUNNER_SECRET_HINT} ` +
+      `Plaintext secret reveal is disabled. ${scriptRunnerSecretHint(config)} ` +
         "If plaintext is truly required, restart the server with OP_MCP_ENABLE_SECRET_REVEAL=true or --enable-secret-reveal=true.",
     );
   }
@@ -303,8 +360,9 @@ function assertSecretRevealEnabled(config: ServerConfig): void {
 
 function assertScriptRunnerEnabled(config: ServerConfig): void {
   if (!config.enableScriptRunner) {
+    const toolName = scriptRunnerToolName(config);
     throw new Error(
-      "The 1Password script runner is disabled. Restart the server with --enable-script-runner=true to allow this tool.",
+      `The 1Password script runner is disabled. Restart the server with --enable-script-runner=true to allow ${toolName}.`,
     );
   }
 }
@@ -343,10 +401,14 @@ function assertPermissionMutationEnabled(config: ServerConfig): void {
 
 function secretConsumptionGuidance(config: ServerConfig): Record<string, unknown> {
   const unrestrictedScriptRunner = config.enableUnrestrictedScriptRunner;
+  const connectWorkspaceResolution =
+    config.authMode === "connect" && !unrestrictedScriptRunner;
   return {
-    preferredPath: "op_script_run",
+    preferredPath: scriptRunnerToolName(config),
     reason: unrestrictedScriptRunner
       ? "Use this path when the user needs a secret consumed by a local command, not displayed to the model. This server accepts free-form commands after local session approval."
+      : connectWorkspaceResolution
+        ? "Use this path when the user needs a secret consumed by a local command in a trusted Connect workspace, not displayed to the model. op:// references are resolved through Connect only."
       : "Use this path when the user needs a secret consumed by an allowlisted command, not displayed to the model.",
     plaintextRevealEnabled: config.enableSecretReveal,
     scriptRunnerEnabled: config.enableScriptRunner,
@@ -354,8 +416,12 @@ function secretConsumptionGuidance(config: ServerConfig): Record<string, unknown
     nextStep: config.enableScriptRunner
       ? unrestrictedScriptRunner
         ? "Call op_script_run with workspaceRoot, command, reason, and envSecretRefs mapping env var names to op:// references. If authorizationRequired is returned, open approvalUrl locally once for this MCP process and retry."
-        : "Call op_script_list for the workspaceRoot, then op_script_run with commandId and envSecretRefs mapping env var names to op:// references."
-      : "Restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist or --script-runner-allowlist-manifest entries to enable secret injection into scripts.",
+        : connectWorkspaceResolution
+          ? "Call workspace_trust_list for the workspaceRoot and inspect workspaceCommandResolution. If freeformCommands=true, call workspace_command_run with command, reason, and envSecretRefs; otherwise choose a listed commandId and call workspace_command_run with commandId."
+          : "Call op_script_list for the workspaceRoot, choose a listed commandId, then call op_script_run with commandId, reason, and envSecretRefs."
+      : config.authMode === "connect"
+        ? "Restart the server with --enable-script-runner=true plus startup --script-runner-allowlist or --script-runner-allowlist-manifest entries, then call workspace_trust_list and workspace_command_run for Connect-backed secret injection."
+        : "Restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist or --script-runner-allowlist-manifest entries to enable secret injection into scripts.",
   };
 }
 
@@ -390,8 +456,10 @@ function scriptRunnerSecretInstruction(config: ServerConfig): string {
   return config.enableScriptRunner
     ? config.enableUnrestrictedScriptRunner
       ? "Call op_script_run with workspaceRoot, command, reason, and envSecretRefs mapping environment variable names to op:// references; if authorizationRequired is returned, open approvalUrl locally once for this MCP process and retry."
-      : "Call op_script_list for the workspaceRoot, then op_script_run with commandId and envSecretRefs mapping environment variable names to op:// references."
-    : "op_script_run is not available because the script runner is also disabled here; restart the server with --enable-script-runner=true plus startup --script-runner-root and --script-runner-allowlist or --script-runner-allowlist-manifest entries to allow no-plaintext secret consumption by scripts.";
+      : config.authMode === "connect"
+        ? "Call workspace_trust_list for the workspaceRoot and inspect workspaceCommandResolution. If freeformCommands=true, call workspace_command_run with command, reason, and envSecretRefs; otherwise choose a listed commandId and call workspace_command_run with commandId. op:// references are resolved through Connect only."
+        : "Call op_script_list for the workspaceRoot, choose a listed commandId, then call op_script_run with commandId, reason, and envSecretRefs."
+    : `${scriptRunnerToolName(config)} is not available because the script runner is also disabled here; restart the server with --enable-script-runner=true plus startup --script-runner-allowlist or --script-runner-allowlist-manifest entries to allow no-plaintext secret consumption by scripts.`;
 }
 
 function plaintextRevealDescription(
@@ -399,7 +467,7 @@ function plaintextRevealDescription(
   enabledDescription: string,
 ): string {
   if (config.enableSecretReveal) {
-    return `${enabledDescription} ${SCRIPT_RUNNER_SECRET_HINT}`;
+    return `${enabledDescription} ${scriptRunnerSecretHint(config)}`;
   }
 
   return (
@@ -411,7 +479,7 @@ function plaintextRevealDescription(
 function passwordReadDescription(config: ServerConfig): string {
   const base = "Read one password field or secret reference. Returns redacted metadata by default.";
   if (config.enableSecretReveal) {
-    return `${base} Plaintext reveal is enabled with reveal=true plus reason and acknowledgement. ${SCRIPT_RUNNER_SECRET_HINT}`;
+    return `${base} Plaintext reveal is enabled with reveal=true plus reason and acknowledgement. ${scriptRunnerSecretHint(config)}`;
   }
 
   return (
@@ -844,9 +912,10 @@ function scriptRunStructuredContent(
 function unrestrictedScriptRunStructuredContent(
   result: OpScriptCommandRunResult,
   outputPolicy: ScriptOutputPolicy,
+  mode = "unrestricted",
 ): Record<string, unknown> {
   return {
-    mode: "unrestricted",
+    mode,
     workspaceRoot: result.workspaceRoot,
     cwd: result.cwd,
     authMode: result.authMode,
@@ -991,54 +1060,62 @@ export function createOnePasswordMcpServer(
       }),
   );
 
-  server.registerTool(
-    "op_session_status",
-    {
-      description:
-        "Show non-secret 1Password CLI session state and runtime capability gates held by this MCP process.",
-    },
-    async () => {
-      const status = scriptRunner.status();
-      const unrestrictedStatus = unrestrictedRunner.status();
-      return jsonResult({
-        backend: config.authMode,
-        ...status,
-        secretRevealEnabled: config.enableSecretReveal,
-        writesEnabled: config.enableWrites,
-        destructiveActionsEnabled: config.enableDestructiveActions,
-        permissionMutationEnabled: config.enablePermissionMutation,
-        scriptRunnerEnabled: config.enableScriptRunner,
-        unrestrictedScriptRunnerEnabled: config.enableUnrestrictedScriptRunner,
-        scriptRunnerAllowlistCount:
-          status.loadedAllowlistCount ?? config.scriptRunnerAllowlistPaths.length,
-        scriptRunnerConfiguredAllowlistPathCount:
-          config.scriptRunnerAllowlistPaths.length,
-        scriptRunnerAllowlistManifestCount:
-          config.scriptRunnerAllowlistManifestPaths.length,
-        approvalRememberTtlMs: config.approvalRememberTtlMs,
-        unrestrictedRunner: sessionUnrestrictedRunnerStatus(
-          config,
-          approvalManager,
-          unrestrictedStatus,
-        ),
-        diagnostics: {
-          backend: config.authMode,
-          enabled: config.enableDiagnostics,
-          pid: process.pid,
-          ppid: process.ppid,
-          ...serviceRuntimeDiagnostics(service),
-        },
-        secretConsumptionGuidance: secretConsumptionGuidance(config),
-      });
-    },
-  );
-
-  if (config.enableScriptRunner) {
+  if (config.authMode !== "connect") {
     server.registerTool(
-      "op_script_list",
+      "op_session_status",
       {
         description:
-          `List currently loaded startup-configured allowlisted scripts. ${SCRIPT_RUNNER_SECRET_HINT}`,
+          "Show non-secret 1Password CLI session state and runtime capability gates held by this MCP process.",
+      },
+      async () => {
+        const status = scriptRunner.status();
+        const unrestrictedStatus = unrestrictedRunner.status();
+        return jsonResult({
+          backend: config.authMode,
+          ...status,
+          secretRevealEnabled: config.enableSecretReveal,
+          writesEnabled: config.enableWrites,
+          destructiveActionsEnabled: config.enableDestructiveActions,
+          permissionMutationEnabled: config.enablePermissionMutation,
+          scriptRunnerEnabled: config.enableScriptRunner,
+          unrestrictedScriptRunnerEnabled: config.enableUnrestrictedScriptRunner,
+          scriptRunnerAllowlistCount:
+            status.loadedAllowlistCount ?? config.scriptRunnerAllowlistPaths.length,
+          scriptRunnerConfiguredAllowlistPathCount:
+            config.scriptRunnerAllowlistPaths.length,
+          scriptRunnerAllowlistManifestCount:
+            config.scriptRunnerAllowlistManifestPaths.length,
+          approvalRememberTtlMs: config.approvalRememberTtlMs,
+          unrestrictedRunner: sessionUnrestrictedRunnerStatus(
+            config,
+            approvalManager,
+            unrestrictedStatus,
+          ),
+          diagnostics: {
+            backend: config.authMode,
+            enabled: config.enableDiagnostics,
+            pid: process.pid,
+            ppid: process.ppid,
+            ...serviceRuntimeDiagnostics(service),
+          },
+          secretConsumptionGuidance: secretConsumptionGuidance(config),
+        });
+      },
+    );
+  }
+
+  if (config.enableScriptRunner) {
+    const listToolName = scriptListToolName(config);
+    const reloadToolName = scriptReloadToolName(config);
+    const runToolName = scriptRunnerToolName(config);
+
+    server.registerTool(
+      listToolName,
+      {
+        description:
+          config.authMode === "connect"
+            ? `Resolve a requested workspaceRoot against startup-configured Connect workspace trust entries and report whether workspace_command_run may accept a free-form command there. envSecretRefs op:// references are resolved through Connect only and injected into child-process environment variables; this does not use the op binary or OP_SESSION. ${scriptRunnerSecretHint(config)}`
+            : `List currently loaded startup-configured command entries. ${scriptRunnerSecretHint(config)}`,
         inputSchema: {
           workspaceRoot: z.string().min(1),
         },
@@ -1051,24 +1128,21 @@ export function createOnePasswordMcpServer(
             workspaceRoot,
             commands: [],
             message:
-              "Unrestricted script runner is enabled; startup allowlists are ignored and op_script_run accepts a free-form command after one local approval per MCP process.",
+              `Unrestricted script runner is enabled; startup command catalogs and workspace trust files are ignored, and ${runToolName} accepts a free-form command after one local approval per MCP process.`,
           });
         }
         const allowlist = await scriptRunner.list(workspaceRoot);
-        return jsonResult({
-          path: allowlist.path,
-          workspaceRoot: allowlist.workspaceRoot,
-          commands: allowlist.commands,
-        });
+        return jsonResult(scriptListContent(config, allowlist, workspaceRoot));
       },
     );
 
     server.registerTool(
-      "op_script_reload_allowlists",
+      reloadToolName,
       {
         description:
-          "Reload the startup-configured script allowlist files into this MCP process. " +
-          "Only direct allowlist paths, manifest trust anchors, and trusted roots configured at server startup are used; invalid reloads fail without replacing the active allowlists.",
+          config.authMode === "connect"
+            ? "Reload startup-configured Connect workspace trust and command catalog files into this MCP process. Only direct trust paths, manifest trust anchors, and trusted roots configured at server startup are used; invalid reloads fail without replacing the active configuration."
+            : "Reload the startup-configured script allowlist files into this MCP process. Only direct allowlist paths, manifest trust anchors, and trusted roots configured at server startup are used; invalid reloads fail without replacing the active allowlists.",
         inputSchema: {
           reason: z.string().min(3),
         },
@@ -1087,7 +1161,7 @@ export function createOnePasswordMcpServer(
             allowlistCount: 0,
             commandCount: 0,
           };
-          recordAudit(auditLogger, "op_script_reload_allowlists", "success", {
+          recordAudit(auditLogger, reloadToolName, "success", {
             reason,
             ...result,
           });
@@ -1103,7 +1177,7 @@ export function createOnePasswordMcpServer(
               config.scriptRunnerAllowlistManifestPaths.length,
             ...reload,
           };
-          recordAudit(auditLogger, "op_script_reload_allowlists", "success", {
+          recordAudit(auditLogger, reloadToolName, "success", {
             reason,
             ...result,
           });
@@ -1111,7 +1185,7 @@ export function createOnePasswordMcpServer(
         } catch (error) {
           recordAudit(
             auditLogger,
-            "op_script_reload_allowlists",
+            reloadToolName,
             "error",
             {
               reason,
@@ -1127,10 +1201,12 @@ export function createOnePasswordMcpServer(
     );
 
     server.registerTool(
-      "op_script_run",
+      runToolName,
       {
         description:
-          `Run one script with 1Password CLI auth injected by the MCP process. In normal mode this runs a startup-configured allowlisted commandId. When --enable-unrestricted-script-runner=true is set, startup allowlists are ignored and this accepts a free-form command after one local browser approval per MCP process. ${SCRIPT_RUNNER_SECRET_HINT} Use this instead of password_read reveal or secret_reveal when the secret only needs to be passed to a script. If returnOutput=true is requested for secret-injected or sensitive output without plaintext acknowledgement, execution is skipped and the required acknowledgement is returned.`,
+          config.authMode === "connect"
+            ? "Run one trusted workspace command with 1Password Connect-backed environment injection by the MCP process. The requested workspaceRoot is resolved against startup-configured workspace trust entries; when that resolved entry enables workspace commands, workspace_command_run accepts a free-form command rooted in the resolved workspace or its subdirectories. It can also run a listed commandId. envSecretRefs maps environment variable names to op:// references, resolves them through Connect only, injects values in memory into the child process, and never returns or audits plaintext secrets. This tool does not use the op binary, OP_SESSION, or Desktop SDK auth. If returnOutput=true is requested for secret-injected or sensitive output without plaintext acknowledgement, execution is skipped and the required acknowledgement is returned."
+            : `Run one script with 1Password-backed environment injection by the MCP process. In normal mode this runs a startup-configured commandId. When --enable-unrestricted-script-runner=true is set, startup command catalogs and workspace trust files are ignored and this accepts a free-form command after one local browser approval per MCP process. ${scriptRunnerSecretHint(config)} Use this instead of password_read reveal or secret_reveal when the secret only needs to be passed to a script. If returnOutput=true is requested for secret-injected or sensitive output without plaintext acknowledgement, execution is skipped and the required acknowledgement is returned.`,
         inputSchema: {
           workspaceRoot: z.string().min(1),
           commandId: z.string().min(1).optional(),
@@ -1160,6 +1236,10 @@ export function createOnePasswordMcpServer(
           envSecretReferences = summarizeEnvSecretRefs(validatedEnvSecretRefs);
           injectedSecretEnvVars = envSecretReferences.map((entry) => entry.envVar);
 
+          if (command && commandId) {
+            throw new Error("Provide either commandId or command, not both.");
+          }
+
           if (config.enableUnrestrictedScriptRunner) {
             if (!command) {
               throw new Error(
@@ -1177,7 +1257,7 @@ export function createOnePasswordMcpServer(
               );
               recordAudit(
                 auditLogger,
-                "op_script_run_authorization_required",
+                `${runToolName}_authorization_required`,
                 "success",
                 {
                   workspaceRoot,
@@ -1200,7 +1280,7 @@ export function createOnePasswordMcpServer(
               acknowledgePlaintext,
             );
             if (shouldSkipForMissingOutputAcknowledgement(outputPolicy)) {
-              recordAudit(auditLogger, "op_script_run_output_ack_required", "success", {
+              recordAudit(auditLogger, `${runToolName}_output_ack_required`, "success", {
                 mode: "unrestricted",
                 workspaceRoot,
                 commandHash: sha256Hash(command),
@@ -1239,7 +1319,7 @@ export function createOnePasswordMcpServer(
             });
             const outcome =
               result.exitCode === 0 && !result.timedOut ? "success" : "error";
-            recordAudit(auditLogger, "op_script_run", outcome, {
+            recordAudit(auditLogger, runToolName, outcome, {
               mode: "unrestricted",
               workspaceRoot: result.workspaceRoot,
               cwd: result.cwd,
@@ -1279,8 +1359,116 @@ export function createOnePasswordMcpServer(
             };
           }
 
+          if (command) {
+            if (config.authMode !== "connect") {
+              throw new Error("Workspace commands require connect auth mode.");
+            }
+            if (config.opCliAuthMode !== "auto") {
+              throw new Error(
+                "Workspace commands require Connect-owned secret resolution with op-cli-auth-mode=auto.",
+              );
+            }
+            const allowlist = await scriptRunner.list(workspaceRoot);
+            if (!allowlist.allowWorkspaceCommands) {
+              throw new Error(
+                "Workspace command resolution matched the requested workspaceRoot, but free-form workspace commands are not enabled for that Connect workspace trust entry.",
+              );
+            }
+
+            const outputPolicy = resolveScriptOutputPolicy(
+              returnOutput,
+              true,
+              acknowledgePlaintext,
+            );
+            if (shouldSkipForMissingOutputAcknowledgement(outputPolicy)) {
+              recordAudit(auditLogger, `${runToolName}_output_ack_required`, "success", {
+                mode: "workspace-commands",
+                workspaceRoot,
+                commandHash: sha256Hash(command),
+                commandLength: command.length,
+                reason,
+                sensitiveOutput: true,
+                outputRequested: outputPolicy.requested,
+                outputReturned: outputPolicy.returned,
+                outputState: outputPolicy.state,
+                requiredAcknowledgement: outputPolicy.requiredAcknowledgement,
+                envSecretRefCount: envSecretReferences.length,
+                injectedSecretEnvVars,
+                envSecretReferences,
+              });
+
+              return textResult(
+                outputAcknowledgementRequiredText(),
+                outputAcknowledgementRequiredContent(outputPolicy, {
+                  mode: "workspace-commands",
+                  workspaceRoot,
+                  commandHash: sha256Hash(command),
+                  commandLength: command.length,
+                  sensitiveOutput: true,
+                  envSecretRefCount: envSecretReferences.length,
+                  injectedSecretEnvVars,
+                }),
+              );
+            }
+
+            const { extraEnv, secretRedactionValues } = await resolveEnvSecretRefs(
+              service,
+              validatedEnvSecretRefs,
+            );
+            const result = await scriptRunner.runCommand(workspaceRoot, command, {
+              extraEnv,
+              secretRedactionValues,
+            });
+            const outcome =
+              result.exitCode === 0 && !result.timedOut ? "success" : "error";
+            recordAudit(auditLogger, runToolName, outcome, {
+              mode: "workspace-commands",
+              workspaceRoot: result.workspaceRoot,
+              cwd: result.cwd,
+              commandHash: sha256Hash(command),
+              commandLength: command.length,
+              shell: result.shell,
+              authMode: result.authMode,
+              reason,
+              durationMs: result.durationMs,
+              exitCode: result.exitCode,
+              signal: result.signal,
+              timedOut: result.timedOut,
+              outputTruncated: result.outputTruncated,
+              refreshedAuth: result.refreshedAuth,
+              sensitiveOutput: result.sensitiveOutput,
+              outputRequested: outputPolicy.requested,
+              outputReturned: outputPolicy.returned,
+              outputState: outputPolicy.state,
+              envSecretRefCount: envSecretReferences.length,
+              injectedSecretEnvVars,
+              envSecretReferences,
+              ...(outputPolicy.requiredAcknowledgement
+                ? { requiredAcknowledgement: outputPolicy.requiredAcknowledgement }
+                : {}),
+            }, result.errorMessage);
+
+            return {
+              ...textResult(
+                commandOutputText(result, outputPolicy),
+                {
+                  ...unrestrictedScriptRunStructuredContent(
+                    result,
+                    outputPolicy,
+                    "workspace-commands",
+                  ),
+                  envSecretRefCount: envSecretReferences.length,
+                  injectedSecretEnvVars,
+                },
+              ),
+              isError: outcome === "error",
+            };
+          }
+
           if (!commandId) {
-            throw new Error("commandId is required unless unrestricted script runner mode is enabled.");
+            throw new Error(
+              "commandId is required unless unrestricted script runner mode or workspace commands are enabled.",
+            );
           }
           const allowlistedCommand = await getAllowlistedCommand(
             scriptRunner,
@@ -1293,7 +1481,7 @@ export function createOnePasswordMcpServer(
             acknowledgePlaintext,
           );
           if (shouldSkipForMissingOutputAcknowledgement(outputPolicy)) {
-            recordAudit(auditLogger, "op_script_run_output_ack_required", "success", {
+            recordAudit(auditLogger, `${runToolName}_output_ack_required`, "success", {
               workspaceRoot,
               commandId,
               command: allowlistedCommand.command,
@@ -1332,7 +1520,7 @@ export function createOnePasswordMcpServer(
           });
           const outcome =
             result.exitCode === 0 && !result.timedOut ? "success" : "error";
-          recordAudit(auditLogger, "op_script_run", outcome, {
+          recordAudit(auditLogger, runToolName, outcome, {
             workspaceRoot: result.workspaceRoot,
             commandId: result.commandId,
             command: result.command,
@@ -1372,7 +1560,7 @@ export function createOnePasswordMcpServer(
         } catch (error) {
           recordAudit(
             auditLogger,
-            "op_script_run",
+            runToolName,
             "error",
             {
               workspaceRoot,
@@ -1391,24 +1579,26 @@ export function createOnePasswordMcpServer(
       },
     );
 
-    server.registerTool(
-      "op_session_reset",
-      {
-        description:
-          "Clear cached 1Password CLI session state held by this MCP process.",
-      },
-      async () => {
-        assertScriptRunnerEnabled(config);
-        scriptRunner.reset();
-        return jsonResult({
-          reset: true,
-          status: scriptRunner.status(),
-        });
-      },
-    );
+    if (config.authMode !== "connect") {
+      server.registerTool(
+        "op_session_reset",
+        {
+          description:
+            "Clear cached 1Password CLI session state held by this MCP process.",
+        },
+        async () => {
+          assertScriptRunnerEnabled(config);
+          scriptRunner.reset();
+          return jsonResult({
+            reset: true,
+            status: scriptRunner.status(),
+          });
+        },
+      );
+    }
   }
 
-  if (config.enableUnrestrictedRunner) {
+  if (config.enableUnrestrictedRunner && config.authMode !== "connect") {
     server.registerTool(
       "op_unrestricted_run",
       {
@@ -2579,10 +2769,10 @@ export function createOnePasswordMcpServer(
 
   if (capabilities.environments) {
     server.registerTool(
-    "environment_get_variables",
+      "environment_get_variables",
     {
       description:
-        `Get 1Password Environment variables with values redacted. Supports simple client-side filtering by variable name. ${SCRIPT_RUNNER_SECRET_HINT}`,
+        `Get 1Password Environment variables with values redacted. Supports simple client-side filtering by variable name. ${scriptRunnerSecretHint(config)}`,
       inputSchema: {
         environmentId: z.string().min(1),
         query: z.string().optional(),
@@ -2605,10 +2795,10 @@ export function createOnePasswordMcpServer(
   );
 
     server.registerTool(
-    "environment_get_variable",
+      "environment_get_variable",
     {
       description:
-        `Get one 1Password Environment variable by exact name, with the value redacted. ${SCRIPT_RUNNER_SECRET_HINT}`,
+        `Get one 1Password Environment variable by exact name, with the value redacted. ${scriptRunnerSecretHint(config)}`,
       inputSchema: {
         environmentId: z.string().min(1),
         name: z.string().min(1),

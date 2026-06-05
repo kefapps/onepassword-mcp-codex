@@ -42,6 +42,9 @@ export const SDK_CAPABILITIES = {
     "environment_get_variable",
     "environment_reveal_variable",
     "secret_reveal",
+    "workspace_trust_list",
+    "workspace_trust_reload",
+    "workspace_command_run",
     "op_script_list",
     "op_script_reload_allowlists",
     "op_script_run",
@@ -73,13 +76,14 @@ export const SDK_CAPABILITIES = {
   notes: [
     "Desktop auth requires the 1Password desktop app beta with SDK integration enabled.",
     "Secrets are opaque by default. Plaintext reveal is disabled unless the server starts with --enable-secret-reveal=true.",
-    "When a secret is needed only by a command or local script, prefer op_script_run with envSecretRefs instead of password_read reveal or secret_reveal; the server injects values into the child process without returning plaintext to the model.",
+    "When a secret is needed only by a command or local script, prefer workspace_command_run in Connect mode and op_script_run in Desktop/service-account mode with envSecretRefs instead of password_read reveal or secret_reveal; the server injects values into the child process without returning plaintext to the model.",
     "For new credentials that need to live in 1Password, prefer item_request_create: declare credential field names only, let the user fill the returned op:// references in 1Password, then use item_request_list to review managed items.",
     "Password generator tools return new plaintext secrets only with a reason and generated-secret acknowledgement.",
     "Write, destructive, and permission mutation tools are separately gated behind startup flags; destructive and permission mutation calls require per-call acknowledgement.",
-    "The allowlisted script runner is disabled unless the server starts with --enable-script-runner=true.",
-    "The unrestricted script runner is disabled unless the server starts with --enable-unrestricted-script-runner=true. In that mode op_script_run ignores startup allowlists, accepts free-form shell commands after one local approval per MCP process, and still supports envSecretRefs injection.",
-    "The script runner only uses startup-configured --script-runner-allowlist paths and --script-runner-allowlist-manifest trust anchors; their file contents can be reloaded on demand and stdout/stderr is withheld by default. Sensitive output requested without acknowledgement is rejected before the command is executed.",
+    "The script runner is disabled unless the server starts with --enable-script-runner=true.",
+    "The unrestricted script runner is disabled unless the server starts with --enable-unrestricted-script-runner=true. In that mode op_script_run ignores startup command catalogs and workspace trust files, accepts free-form shell commands after one local approval per MCP process, and still supports envSecretRefs injection.",
+    "In Connect mode, workspace_trust_list resolves a requested workspaceRoot against startup-configured workspace trust entries and reports workspaceCommandResolution. When the resolved entry enables workspace commands, workspace_command_run accepts a free-form command rooted in that workspace while resolving op:// envSecretRefs through Connect only and injecting them without returning plaintext.",
+    "The script runner only uses startup-configured command catalogs, workspace trust files, manifest trust anchors, and trusted roots; their file contents can be reloaded on demand and stdout/stderr is withheld by default. Sensitive output requested without acknowledgement is rejected before the command is executed.",
     "The unrestricted runner is disabled unless the server starts with --enable-unrestricted-runner=true and configured roots. It accepts free-form shell commands only after explicit local session approval; the configured path is an approval scope, not an operating-system sandbox.",
     "HTTP transport is optional, local/single-user by design, validates browser Origin headers, bounds session lifetime/count, and requires OP_MCP_HTTP_BEARER_TOKEN unless explicitly disabled on localhost.",
     "Vault permission mutation is available only for group-based access because that is the surface exposed by the official JS SDK beta.",
@@ -114,6 +118,27 @@ export function backendCapabilities(config: ServerConfig): BackendCapabilities {
 export function effectiveSupportedTools(config: ServerConfig): string[] {
   const capabilities = backendCapabilities(config);
   return SDK_CAPABILITIES.supportedTools.filter((tool) => {
+    if (
+      tool === "workspace_trust_list" ||
+      tool === "workspace_trust_reload" ||
+      tool === "workspace_command_run"
+    ) {
+      return config.authMode === "connect" && config.enableScriptRunner;
+    }
+    if (
+      tool === "op_script_list" ||
+      tool === "op_script_reload_allowlists" ||
+      tool === "op_script_run" ||
+      tool === "op_session_reset"
+    ) {
+      return config.authMode !== "connect" && config.enableScriptRunner;
+    }
+    if (tool === "op_session_status") {
+      return config.authMode !== "connect";
+    }
+    if (tool === "op_unrestricted_run") {
+      return config.authMode !== "connect" && config.enableUnrestrictedRunner;
+    }
     if (
       (tool === "password_create" ||
         tool === "password_update" ||
@@ -168,18 +193,6 @@ export function effectiveSupportedTools(config: ServerConfig): string[] {
       tool === "item_delete" &&
       (!config.enableDestructiveActions || !capabilities.itemDelete)
     ) {
-      return false;
-    }
-    if (
-      (tool === "op_script_list" ||
-        tool === "op_script_reload_allowlists" ||
-        tool === "op_script_run" ||
-        tool === "op_session_reset") &&
-      !config.enableScriptRunner
-    ) {
-      return false;
-    }
-    if (tool === "op_unrestricted_run" && !config.enableUnrestrictedRunner) {
       return false;
     }
     return true;

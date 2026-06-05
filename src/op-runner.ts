@@ -14,7 +14,8 @@ const FORCE_KILL_GRACE_MS = 1_000;
 export type ResolvedOpCliAuthMode =
   | "desktop"
   | "manual-session"
-  | "service-account";
+  | "service-account"
+  | "connect";
 
 export interface AllowlistedCommand {
   id: string;
@@ -30,6 +31,7 @@ export interface ScriptAllowlist {
   path: string;
   workspaceRoot: string;
   workspaceRootMatch?: "exact" | "prefix";
+  allowWorkspaceCommands: boolean;
   commands: AllowlistedCommand[];
 }
 
@@ -146,6 +148,7 @@ const allowlistSchema = z.object({
   workspaceRoot: z.string().min(1).optional(),
   workspaceRoots: z.array(z.string().min(1)).optional(),
   workspaceRootPrefixes: z.array(z.string().min(1)).optional(),
+  allowWorkspaceCommands: z.boolean().optional(),
   commands: z.record(commandSchema),
 });
 
@@ -253,6 +256,9 @@ function appendOutput(
 
 function resolveAuthMode(config: ServerConfig): ResolvedOpCliAuthMode {
   if (config.opCliAuthMode === "auto") {
+    if (config.authMode === "connect") {
+      return "connect";
+    }
     return config.authMode === "service-account" ? "service-account" : "manual-session";
   }
 
@@ -554,6 +560,14 @@ export class OpCliSessionManager {
       };
     }
 
+    if (mode === "connect") {
+      return {
+        mode,
+        env: createChildEnvironment(mode, {}),
+        refreshedAuth: false,
+      };
+    }
+
     if (!this.config.account) {
       throw new Error("op CLI auth requires --account or OP_MCP_ACCOUNT.");
     }
@@ -819,13 +833,31 @@ export class DefaultOpScriptRunner implements OpScriptRunner {
     command: string,
     options: OpScriptRunOptions = {},
   ): Promise<OpScriptCommandRunResult> {
-    if (!this.config.enableUnrestrictedScriptRunner) {
+    if (this.config.enableUnrestrictedScriptRunner) {
+      return this.runShellCommand(await realpath(workspaceRoot), command, options);
+    }
+
+    if (resolveAuthMode(this.config) !== "connect") {
       throw new Error(
-        "Unrestricted script runner is disabled. Restart the server with --enable-unrestricted-script-runner=true to allow free-form op_script_run commands.",
+        "Workspace commands require connect auth mode.",
       );
     }
 
-    const resolvedWorkspaceRoot = await realpath(workspaceRoot);
+    const { allowlist, requestedWorkspaceRoot } = await this.resolveAllowlist(workspaceRoot);
+    if (!allowlist.allowWorkspaceCommands) {
+      throw new Error(
+        "Workspace command resolution matched the requested workspaceRoot, but free-form workspace commands are not enabled for that Connect workspace trust entry.",
+      );
+    }
+
+    return this.runShellCommand(requestedWorkspaceRoot, command, options);
+  }
+
+  private async runShellCommand(
+    resolvedWorkspaceRoot: string,
+    command: string,
+    options: OpScriptRunOptions,
+  ): Promise<OpScriptCommandRunResult> {
     const { shell, shellArgs } = shellCommand(command);
     const auth = await this.sessionManager.getEnvironment();
     const env = createScriptEnvironment(
@@ -901,6 +933,7 @@ function scriptAllowlistFromParsed(
     path: allowlistPath,
     workspaceRoot,
     workspaceRootMatch,
+    allowWorkspaceCommands: parsed.allowWorkspaceCommands ?? false,
     commands: Object.entries(parsed.commands).map(([id, command]) => ({
       id,
       description: command.description,

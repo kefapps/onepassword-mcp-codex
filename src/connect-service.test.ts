@@ -236,6 +236,7 @@ test("ConnectOnePasswordService resolves op references without the Desktop SDK",
   );
 
   assert.equal(await service.secretResolve("op://Engineering/Database/password"), "secret");
+  assert.equal(await service.secretResolve("op://Engineering Team/Database/password"), "secret");
   assert.equal(
     await service.secretResolve("op://Engineering/Database/Credentials/api-token"),
     "token-secret",
