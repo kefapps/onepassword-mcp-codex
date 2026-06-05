@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  DEFAULT_WORKSPACE_TRUST_MANIFEST_PATH,
   parseWorkspaceTrustArgs,
   trustWorkspace,
+  workspaceTrustUsage,
 } from "./workspace-trust.js";
 
 async function readJson(path: string): Promise<unknown> {
@@ -138,8 +140,17 @@ test("parseWorkspaceTrustArgs defaults to the current directory and default mani
   const options = parseWorkspaceTrustArgs([], "/workspace");
 
   assert.equal(options.workspacePath, "/workspace");
-  assert.match(options.manifestPath, /workspace-trust\.json$/);
+  assert.equal(options.manifestPath, DEFAULT_WORKSPACE_TRUST_MANIFEST_PATH);
   assert.equal(options.scope, "exact");
+});
+
+test("workspace trust CLI is exposed through onepassword-mcp-cli", async () => {
+  const packageJson = (await readJson(join(import.meta.dirname, "..", "package.json"))) as {
+    bin?: Record<string, string>;
+  };
+
+  assert.equal(packageJson.bin?.["onepassword-mcp-cli"], "dist/connect-index.js");
+  assert.match(workspaceTrustUsage(), /onepassword-mcp-cli trust-workspace/);
 });
 
 test("parseWorkspaceTrustArgs accepts explicit path, manifest, and prefix scope", () => {
