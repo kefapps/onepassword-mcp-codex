@@ -794,6 +794,8 @@ test("connect script runner exposes workspace tools without op tools", async () 
   });
   const capabilityPayload = capabilities.structuredContent as {
     effectiveSupportedTools: string[];
+    supportedTools: string[];
+    notes: string[];
     secretConsumptionGuidance: { preferredPath: string; nextStep: string };
   };
 
@@ -811,6 +813,11 @@ test("connect script runner exposes workspace tools without op tools", async () 
   assert.doesNotMatch(workspaceCommandTool?.description ?? "", /op_script_run/);
   assert.match(secretRevealTool?.description ?? "", /workspace_command_run/);
   assert.doesNotMatch(secretRevealTool?.description ?? "", /op_script_run/);
+  assert(!capabilityPayload.supportedTools.includes("op_script_run"));
+  assert(!capabilityPayload.supportedTools.includes("op_session_status"));
+  assert(capabilityPayload.supportedTools.includes("workspace_command_run"));
+  assert.doesNotMatch(capabilityPayload.notes.join("\n"), /op_script_run/);
+  assert.match(capabilityPayload.notes.join("\n"), /workspace_command_run/);
   assert.equal(
     capabilityPayload.secretConsumptionGuidance.preferredPath,
     "workspace_command_run",
@@ -821,6 +828,10 @@ test("connect script runner exposes workspace tools without op tools", async () 
   );
   assert.deepEqual(
     [...capabilityPayload.effectiveSupportedTools].sort(),
+    tools.tools.map((tool) => tool.name).sort(),
+  );
+  assert.deepEqual(
+    [...capabilityPayload.supportedTools].sort(),
     tools.tools.map((tool) => tool.name).sort(),
   );
 });
