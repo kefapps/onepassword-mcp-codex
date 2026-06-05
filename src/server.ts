@@ -425,6 +425,22 @@ function secretConsumptionGuidance(config: ServerConfig): Record<string, unknown
   };
 }
 
+function runtimeCapabilityNotes(config: ServerConfig): string[] {
+  if (config.authMode === "connect") {
+    return [
+      "Connect-only mode does not expose op_script_* tools, op_session_* tools, op_unrestricted_run, the op binary, OP_SESSION, or Desktop SDK auth.",
+      "When a secret is needed only by a command or local script, use workspace_command_run with envSecretRefs; op:// references are resolved through 1Password Connect and injected into the child process without returning plaintext to the model.",
+      "In Connect mode, workspace_trust_list resolves a requested workspaceRoot against startup-configured workspace trust entries and reports workspaceCommandResolution. When the resolved entry enables workspace commands, workspace_command_run accepts a free-form command rooted in that workspace.",
+      "Secrets are opaque by default. Plaintext reveal is disabled unless the server starts with --enable-secret-reveal=true.",
+      "Password generator tools return new plaintext secrets only with a reason and generated-secret acknowledgement.",
+      "Write and destructive tools are separately gated behind startup flags; destructive calls require per-call acknowledgement.",
+      "HTTP transport is optional, local/single-user by design, validates browser Origin headers, bounds session lifetime/count, and requires OP_MCP_HTTP_BEARER_TOKEN unless explicitly disabled on localhost.",
+    ];
+  }
+
+  return [...SDK_CAPABILITIES.notes];
+}
+
 function sessionUnrestrictedRunnerStatus(
   config: ServerConfig,
   approvalManager: UnrestrictedApprovalManager,
@@ -1027,8 +1043,11 @@ export function createOnePasswordMcpServer(
     },
     async () =>
       jsonResult({
+        ...SDK_CAPABILITIES,
         authMode: config.authMode,
         backend: config.authMode,
+        supportedTools,
+        notes: runtimeCapabilityNotes(config),
         secretRevealEnabled: config.enableSecretReveal,
         writesEnabled: config.enableWrites,
         destructiveActionsEnabled: config.enableDestructiveActions,
@@ -1056,7 +1075,6 @@ export function createOnePasswordMcpServer(
         backendCapabilities: capabilities,
         effectiveSupportedTools: supportedTools,
         secretConsumptionGuidance: secretConsumptionGuidance(config),
-        ...SDK_CAPABILITIES,
       }),
   );
 
