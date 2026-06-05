@@ -277,25 +277,16 @@ test("DefaultOpScriptRunner matches allowlist for sibling workspace root prefixe
     sessionManager,
     processRunner,
   );
-  const previousArgvEntryPoint = process.argv[1];
-  process.argv[1] = "/tmp/dist/connect-index.js";
-  try {
-    await assert.rejects(async () => {
-      await connectRunner.list(unrelatedWorkspace);
-    }, (error) => {
-      assert(error instanceof Error);
-      assert.match(
-        error.message,
-        new RegExp(
-          `${process.execPath.replaceAll("/", "\\/")} \\/tmp\\/dist\\/connect-index\\.js trust-workspace`,
-        ),
-      );
-      assert.match(error.message, /workspace_trust_reload/);
-      return true;
-    });
-  } finally {
-    process.argv[1] = previousArgvEntryPoint;
-  }
+  await assert.rejects(async () => {
+    await connectRunner.list(unrelatedWorkspace);
+  }, (error) => {
+    assert(error instanceof Error);
+    assert.match(error.message, /onepassword-mcp-cli trust-workspace/);
+    assert.doesNotMatch(error.message, /connect-index\.js trust-workspace/);
+    assert.doesNotMatch(error.message, /--manifest=/);
+    assert.match(error.message, /workspace_trust_reload/);
+    return true;
+  });
 });
 
 test("DefaultOpScriptRunner runs workspace commands from scoped workspace trust in connect mode", async () => {

@@ -285,25 +285,7 @@ function scriptListReloadToolName(config: ServerConfig): string {
 }
 
 function trustWorkspaceBinaryName(config: ServerConfig): string {
-  return config.authMode === "connect" ? "mcp-1password-connect" : "mcp-1password";
-}
-
-function currentTrustWorkspaceCliInvocation(config: ServerConfig): string {
-  const entryPoint = process.argv[1];
-  if (!entryPoint || !isAbsolute(entryPoint)) {
-    return trustWorkspaceBinaryName(config);
-  }
-
-  const entryPointName = entryPoint.split(/[\\/]/).at(-1);
-  const connectEntryPoints = new Set(["connect-index.js", "mcp-1password-connect"]);
-  const defaultEntryPoints = new Set(["index.js", "mcp-1password"]);
-  const expectedEntryPoints =
-    config.authMode === "connect" ? connectEntryPoints : defaultEntryPoints;
-  if (!entryPointName || !expectedEntryPoints.has(entryPointName)) {
-    return trustWorkspaceBinaryName(config);
-  }
-
-  return `${shellQuote(process.execPath)} ${shellQuote(entryPoint)}`;
+  return config.authMode === "connect" ? "onepassword-mcp-cli" : "mcp-1password";
 }
 
 function missingAllowlistMessage(
@@ -313,9 +295,13 @@ function missingAllowlistMessage(
   const manifestPath =
     config.scriptRunnerAllowlistManifestPaths[0] ??
     DEFAULT_WORKSPACE_TRUST_MANIFEST_PATH;
-  const command = `${currentTrustWorkspaceCliInvocation(config)} trust-workspace ${shellQuote(
+  const manifestFlag =
+    manifestPath === DEFAULT_WORKSPACE_TRUST_MANIFEST_PATH
+      ? ""
+      : ` --manifest=${shellQuote(manifestPath)}`;
+  const command = `${trustWorkspaceBinaryName(config)} trust-workspace ${shellQuote(
     resolvedWorkspaceRoot,
-  )} --manifest=${shellQuote(manifestPath)}`;
+  )}${manifestFlag}`;
   const reloadTool = scriptListReloadToolName(config);
   const reloadInstruction =
     config.scriptRunnerAllowlistManifestPaths.length > 0

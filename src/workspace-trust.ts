@@ -327,9 +327,10 @@ export function parseWorkspaceTrustArgs(
 
 export function workspaceTrustUsage(): string {
   return [
-    "Usage: mcp-1password trust-workspace [workspacePath] [options]",
+    "Usage: onepassword-mcp-cli trust-workspace [workspacePath] [options]",
     "",
     "Adds the current workspace to the Connect workspace trust manifest.",
+    "Defaults: workspacePath is the current directory; manifest is ~/.onepassword-mcp/workspace-trust.json.",
     "",
     "Options:",
     "  --manifest=<path>       Workspace trust manifest to update",
