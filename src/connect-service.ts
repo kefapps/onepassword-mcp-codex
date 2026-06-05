@@ -95,34 +95,35 @@ function parseSecretReference(reference: string): {
   fieldQuery: string;
   attribute: string;
 } {
-  let url: URL;
-  try {
-    url = new URL(reference);
-  } catch {
+  const prefix = "op://";
+  if (!reference.toLowerCase().startsWith(prefix)) {
     throw new Error(`Invalid 1Password secret reference: ${reference}`);
   }
 
-  if (url.protocol !== "op:") {
-    throw new Error(`Invalid 1Password secret reference protocol: ${reference}`);
-  }
+  const referenceBody = reference.slice(prefix.length);
+  const queryStart = referenceBody.indexOf("?");
+  const pathPart = queryStart === -1 ? referenceBody : referenceBody.slice(0, queryStart);
+  const queryPart = queryStart === -1 ? "" : referenceBody.slice(queryStart + 1);
+  const queryWithoutFragment = queryPart.split("#", 1)[0] ?? "";
 
-  const pathParts = url.pathname
+  const pathParts = pathPart
     .split("/")
     .filter(Boolean)
     .map(decodeReferencePathSegment);
-  if (url.hostname.length === 0 || (pathParts.length !== 2 && pathParts.length !== 3)) {
+  if (pathParts.length !== 3 && pathParts.length !== 4) {
     throw new Error("Secret reference must use op://vault/item/[section/]field.");
   }
 
-  const attribute = url.searchParams.get("attribute") ?? url.searchParams.get("attr") ?? "value";
+  const searchParams = new URLSearchParams(queryWithoutFragment);
+  const attribute = searchParams.get("attribute") ?? searchParams.get("attr") ?? "value";
   if (!["value", "title", "id", "type", "purpose", "otp"].includes(attribute)) {
     throw new Error(`Unsupported Connect secret reference attribute: ${attribute}`);
   }
 
   return {
-    vaultQuery: decodeReferencePathSegment(url.hostname),
-    itemQuery: pathParts[0]!,
-    sectionQuery: pathParts.length === 3 ? pathParts[1] : undefined,
+    vaultQuery: pathParts[0]!,
+    itemQuery: pathParts[1]!,
+    sectionQuery: pathParts.length === 4 ? pathParts[2] : undefined,
     fieldQuery: pathParts[pathParts.length - 1]!,
     attribute,
   };

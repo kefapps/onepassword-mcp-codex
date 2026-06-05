@@ -13,7 +13,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes
 - Manage group permissions on vaults when permission mutation is enabled.
 - Reveal plaintext secrets only on explicit request with a per-call acknowledgement.
 - Generate plaintext passwords only with a reason and explicit acknowledgement.
-- Run pre-approved scripts with injected 1Password CLI authentication.
+- Run pre-approved scripts with injected 1Password-backed environment values.
 - Optionally run unrestricted local shell commands under explicitly approved workspace roots, after local browser confirmation.
 - Use stdio by default, or a local/single-user HTTP transport protected by a bearer token.
 - Write a JSONL audit log for sensitive actions at `~/.onepassword-mcp/audit.jsonl`.
@@ -23,7 +23,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes
 - **Node.js >= 20.10**
 - **1Password desktop app** for `--auth-mode=desktop`; this requires the 1Password beta channel with SDK integration enabled.
 - **1Password Connect** for `--auth-mode=connect`; the POC only accepts a localhost Connect host.
-- **1Password CLI (`op`)** only when `--enable-script-runner=true`.
+- **1Password CLI (`op`)** only when scripts need CLI authentication or you configure script runner CLI auth; Connect-backed `envSecretRefs` do not require `op`.
 
 ### Enable Desktop Integration
 
@@ -38,6 +38,10 @@ Desktop auth requires the 1Password beta channel and SDK integration:
 # Public beta install
 npm install -g mcp-1password@beta
 
+# Connect-only binary after global install
+OP_CONNECT_TOKEN="<connect-token>" \
+mcp-1password-connect --connect-host=http://127.0.0.1:8080
+
 # Run on demand without a global install
 npx -y mcp-1password@beta --auth-mode=desktop --account="My Account"
 ```
@@ -45,6 +49,29 @@ npx -y mcp-1password@beta --auth-mode=desktop --account="My Account"
 During beta, prefer `mcp-1password@beta` or an exact version instead of relying on the default npm tag.
 
 ## Quick Start
+
+### Connect-Only Binary
+
+Use `mcp-1password-connect` when you want a path where Connect is the only possible 1Password backend. This binary forces `--auth-mode=connect`, rejects Desktop/service-account auth, rejects non-Connect `op` CLI auth modes, and never instantiates the Desktop SDK service.
+
+```bash
+# From the project root, create/update the trust file and manifest first.
+mcp-1password-connect trust-workspace
+
+OP_CONNECT_TOKEN="<connect-token>" \
+mcp-1password-connect \
+  --connect-host=http://127.0.0.1:8080 \
+  --enable-script-runner=true \
+  --script-runner-allowlist-manifest="$HOME/.onepassword-mcp/workspace-trust.json"
+```
+
+For each new project that should be trusted for Connect workspace commands:
+
+```bash
+mcp-1password-connect trust-workspace
+```
+
+Then call `workspace_trust_reload` in the running MCP session.
 
 ### Claude Desktop (stdio Transport)
 
@@ -123,7 +150,7 @@ Every flag can also be set through an environment variable.
 | `--enable-destructive-actions` | `OP_MCP_ENABLE_DESTRUCTIVE_ACTIONS` | `false` | Allow archive and delete operations |
 | `--enable-permission-mutation` | `OP_MCP_ENABLE_PERMISSION_MUTATION` | `false` | Allow vault permission changes |
 | `--enable-script-runner` | `OP_MCP_ENABLE_SCRIPT_RUNNER` | `false` | Allow execution of allowlisted scripts |
-| `--enable-unrestricted-script-runner` | `OP_MCP_ENABLE_UNRESTRICTED_SCRIPT_RUNNER` | `false` | Enable `op_script_run` free-form shell commands with 1Password injection after one local approval per MCP process; allowlists are ignored |
+| `--enable-unrestricted-script-runner` | `OP_MCP_ENABLE_UNRESTRICTED_SCRIPT_RUNNER` | `false` | Enable `op_script_run` free-form shell commands with 1Password injection after one local approval per MCP process in Desktop/service-account mode; allowlists are ignored |
 | `--script-runner-allowlist` | `OP_MCP_SCRIPT_RUNNER_ALLOWLISTS` | - | Absolute path to an allowlist file; repeatable |
 | `--script-runner-allowlist-manifest` | `OP_MCP_SCRIPT_RUNNER_ALLOWLIST_MANIFESTS` | - | Absolute path to a manifest listing allowlist files; repeatable |
 | `--script-runner-root` | `OP_MCP_SCRIPT_RUNNER_ROOTS` | - | Trusted workspace root; repeatable |
@@ -138,8 +165,8 @@ Every flag can also be set through an environment variable.
 | `--approval-remember-key-path` | `OP_MCP_APPROVAL_REMEMBER_KEY_PATH` | `~/.onepassword-mcp/approval-grants.key` | Local 32-byte AES key file used to encrypt remembered approval grants |
 | `--approval-remember-ttl-ms` | `OP_MCP_APPROVAL_REMEMBER_TTL_MS` | `86400000` | Lifetime for approvals remembered across MCP sessions |
 | `--acknowledge-unrestricted-runner` | `OP_MCP_ACKNOWLEDGE_UNRESTRICTED_RUNNER` | - | Required only when disabling session approval; exact value: `I_UNDERSTAND_THIS_ALLOWS_UNRESTRICTED_LOCAL_COMMAND_EXECUTION` |
-| `--op-cli-path` | `OP_MCP_OP_CLI_PATH` | `op` | Path to the `op` binary; must be absolute when the script runner is enabled |
-| `--op-cli-auth-mode` | `OP_MCP_OP_CLI_AUTH_MODE` | `auto` | `auto`, `desktop`, `manual-session`, or `service-account` |
+| `--op-cli-path` | `OP_MCP_OP_CLI_PATH` | `op` | Path to the `op` binary; must be absolute when the script runner uses op CLI auth |
+| `--op-cli-auth-mode` | `OP_MCP_OP_CLI_AUTH_MODE` | `auto` | `auto`, `desktop`, `manual-session`, or `service-account`; `auto` uses Connect when `--auth-mode=connect` |
 | `--transport` | `OP_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `--http-host` | `OP_MCP_HTTP_HOST` | `127.0.0.1` | HTTP bind address |
 | `--http-port` | `OP_MCP_HTTP_PORT` | `17337` | HTTP port |
@@ -155,9 +182,26 @@ Every flag can also be set through an environment variable.
 
 ## Script Runner
 
-The script runner lets agents invoke pre-approved shell commands with 1Password CLI authentication injected automatically. **Free-form shell execution is never accepted**; only commands defined in startup-configured allowlist files, or in allowlist files referenced by startup-configured manifests, can run. The contents of those files can be reloaded on demand with `op_script_reload_allowlists`.
+The script runner lets agents invoke pre-approved shell commands with 1Password-backed environment injection. In `--auth-mode=connect`, the MCP exposes `workspace_trust_list`, `workspace_command_run`, and `workspace_trust_reload`; `envSecretRefs` are resolved through Connect and injected directly into the child process without the `op` binary, `OP_SESSION`, or Desktop SDK auth. With Desktop or service-account auth, the MCP exposes the older `op_script_list`, `op_script_run`, and `op_script_reload_allowlists` tools, and the runner can also inject CLI authentication for commands that call `op`. By default, only startup-configured `commandId` entries can run. In Connect mode, `workspace_trust_list` resolves the requested `workspaceRoot` against startup-configured workspace trust entries and returns `workspaceCommandResolution`; when that resolution reports `freeformCommands: true`, `workspace_command_run` may accept a free-form `command` rooted in that workspace or its subdirectories. The startup command catalog and workspace trust files can be reloaded on demand with the reload tool.
 
-For local single-user sessions where command allowlists are too expensive, start the server with:
+For a new Connect-mode project, run this from the project root:
+
+```bash
+mcp-1password trust-workspace
+```
+
+This creates or updates `.onepassword-mcp.json` in the project, enables workspace commands for that project, and adds the file to `~/.onepassword-mcp/workspace-trust.json`. Start the MCP with that manifest configured once:
+
+```bash
+mcp-1password \
+  --auth-mode=connect \
+  --enable-script-runner=true \
+  --script-runner-allowlist-manifest="$HOME/.onepassword-mcp/workspace-trust.json"
+```
+
+If the MCP is already running with that manifest, call `workspace_trust_reload` after trusting a new project.
+
+For local single-user sessions where preapproving every command is too expensive, start the server with:
 
 ```bash
 mcp-1password \
@@ -175,7 +219,7 @@ I_UNDERSTAND_THIS_ALLOWS_UNRESTRICTED_LOCAL_COMMAND_EXECUTION
 
 By default, that approval is in memory only and applies once per MCP server process. If you tick **Remember this approval for 24 hours on this machine**, the server writes an encrypted local grant containing only the approval scope and expiration timestamp. After approval, `op_script_run` accepts `command` instead of `commandId`, runs it through a non-login `/bin/sh -c` shell in the requested workspace, and still supports `envSecretRefs` so secrets are injected into the child process without being returned to the model. When the remembered grant expires, the approval page is required again.
 
-### Allowlist Format
+### Command Catalog And Workspace Trust Format
 
 Create a `.onepassword-mcp.json` file at the root of your project:
 
@@ -183,6 +227,7 @@ Create a `.onepassword-mcp.json` file at the root of your project:
 {
   "version": 1,
   "workspaceRoot": ".",
+  "allowWorkspaceCommands": false,
   "commands": {
     "deploy-staging": {
       "description": "Deploy to staging",
@@ -198,14 +243,15 @@ Create a `.onepassword-mcp.json` file at the root of your project:
 
 - `command` must be an **absolute path** to an executable.
 - The directory containing `command` is not automatically prepended to `PATH`. Use absolute paths in scripts, or configure `--op-cli-path` so the directory containing `op` can be injected.
+- In `--auth-mode=connect`, `allowWorkspaceCommands: true` marks the matching `workspaceRoot`, `workspaceRoots`, or `workspaceRootPrefixes` as a trusted workspace command scope. `workspace_trust_list` exposes the decision as `workspaceCommandResolution.freeformCommands`; when it is `true`, `workspace_command_run` accepts a free-form `command` for that resolved workspace or its subdirectories. Secrets passed with `envSecretRefs` are resolved through Connect only, injected only into the child process, and are not returned to the model. This is an explicit trust decision for local worktrees you control.
 - `sensitiveOutput: true` withholds stdout/stderr from the agent unless `returnOutput=true` is explicitly requested with reveal acknowledgement.
-- `op_script_run` accepts an optional `envSecretRefs` object that maps environment variable names to `op://` references. The server resolves those references, injects only the values into the child process environment, and never returns or audits the plaintext values.
+- `workspace_command_run` in Connect mode and `op_script_run` in Desktop/service-account mode accept an optional `envSecretRefs` object that maps environment variable names to `op://` references. The server resolves those references, injects only the values into the child process environment, and never returns or audits the plaintext values.
 - `returnOutput=true` does not require startup secret reveal for ordinary output. When `envSecretRefs` is provided or the command has `sensitiveOutput: true`, stdout/stderr/error messages are returned only with `acknowledgePlaintext: "I_UNDERSTAND_THIS_RETURNS_SECRET_PLAINTEXT"`; without that acknowledgement, execution is skipped with `executionSkipped: true` and `outputState: "skipped_ack_missing"`. Returned stdout/stderr/error messages are redacted by exact secret value.
-- After editing a startup-configured allowlist file, call `op_script_reload_allowlists` with a reason. If the edited file is invalid, the reload fails and the previous in-memory allowlist remains active.
+- After editing a startup-configured command catalog or workspace trust file, call `workspace_trust_reload` in Connect mode or `op_script_reload_allowlists` in Desktop/service-account mode with a reason. If the edited file is invalid, the reload fails and the previous in-memory configuration remains active.
 
-### Allowlist Manifest Format
+### Startup Manifest Format
 
-Use `--script-runner-allowlist-manifest=/absolute/path/to/allowlists.json` when you want to add or remove allowlist files without restarting the MCP process. Manifest entries may be absolute paths or paths relative to the manifest file:
+Use `--script-runner-allowlist-manifest=/absolute/path/to/workspace-trust.json` when you want to add or remove workspace trust or command catalog files without restarting the MCP process. Manifest entries may be absolute paths or paths relative to the manifest file:
 
 ```json
 {
@@ -217,15 +263,15 @@ Use `--script-runner-allowlist-manifest=/absolute/path/to/allowlists.json` when 
 }
 ```
 
-After editing the manifest, call `op_script_reload_allowlists` with a reason. Any new workspace roots are still checked against startup-configured `--script-runner-root` values when roots are provided.
+After editing the manifest, call `workspace_trust_reload` in Connect mode or `op_script_reload_allowlists` in Desktop/service-account mode with a reason. Any new workspace roots are still checked against startup-configured `--script-runner-root` values when roots are provided.
 
 ### Agent Routing Guidance
 
 When an agent needs a secret only to run a local command, it should not call `password_read` with `reveal=true` or `secret_reveal` first. Prefer this flow:
 
-1. Call `op_script_list` for the current workspace.
-2. Pick the allowlisted command that performs the operation.
-3. Call `op_script_run` with `envSecretRefs`, mapping environment variable names to `op://` references.
+1. In Connect mode, call `workspace_trust_list` for the current workspace; in Desktop/service-account mode, call `op_script_list`.
+2. In Connect mode, inspect `workspaceCommandResolution`: if `freeformCommands=true`, call `workspace_command_run` with `command`; otherwise pick a listed `commandId` that performs the operation.
+3. Call `workspace_command_run` in Connect mode or `op_script_run` in Desktop/service-account mode with `envSecretRefs`, mapping environment variable names to `op://` references.
 4. Leave `returnOutput=false` unless command output is required.
 
 This keeps the plaintext secret out of the model transcript while still letting the command receive it.
@@ -283,11 +329,11 @@ mcp-1password \
 - **Destructive actions and permission mutations require per-call acknowledgement.** Use `acknowledgeDestructive: "I_UNDERSTAND_THIS_CAN_DELETE_1PASSWORD_DATA"` for archive/delete operations and `acknowledgePermissionMutation: "I_UNDERSTAND_THIS_CAN_CHANGE_1PASSWORD_PERMISSIONS"` for permissions.
 - **Dangerous capabilities are opt-in and disabled by default**, including writes, destructive actions, permission mutation, secret reveal, the script runner, the unrestricted script runner, and the unrestricted runner.
 - **Every sensitive action is audited** to a JSONL file. Secret references and auth tokens are automatically redacted from logs.
-- **The script runner uses `spawn` with `shell: false`**, so shell injection is not available. Commands must be allowlisted and use absolute paths.
-- **The unrestricted script runner is session-approved and intentionally broad.** When enabled, `op_script_run` ignores startup allowlists and runs free-form shell commands after a local browser approval once per MCP process. Use it only for single-user local sessions you already trust.
+- **The default script runner uses `spawn` with `shell: false`**, so shell injection is not available for `commandId` entries. Connect-mode workspace command resolution is intentionally broader: when `workspaceCommandResolution.freeformCommands=true`, the requested command runs through a non-login shell scoped by the resolved trusted workspace.
+- **The unrestricted script runner is session-approved and intentionally broad.** When enabled, `op_script_run` ignores startup command catalogs and workspace trust files, then runs free-form shell commands after a local browser approval once per MCP process. Use it only for single-user local sessions you already trust.
 - **Remembered approvals are local, encrypted, and expiry-bound.** The approval page can remember a grant for 24 hours by writing an AES-256-GCM encrypted file under `~/.onepassword-mcp`; the file contains approval scope names and expiration timestamps, not 1Password secrets.
-- **Allowlist reloads are bounded and audited.** `op_script_reload_allowlists` only reloads direct allowlist paths and manifest trust anchors configured at startup, records the reload reason, and keeps the previous in-memory allowlist if validation fails.
-- **Script secret injection is run-only.** `envSecretRefs` values are resolved in memory, injected into the allowlisted child process, redacted from returned output, and audited only by env var name, reference scheme, and reference hash.
+- **Configuration reloads are bounded and audited.** `workspace_trust_reload` in Connect mode and `op_script_reload_allowlists` in Desktop/service-account mode only reload direct startup configuration paths and manifest trust anchors configured at startup, record the reload reason, and keep the previous in-memory configuration if validation fails.
+- **Script secret injection is run-only.** `envSecretRefs` values are resolved in memory, injected into the child process, redacted from returned output, and audited only by env var name, reference scheme, and reference hash.
 - **Unrestricted runner approval is local and in-memory.** `op_unrestricted_run` requires a configured root plus browser approval by default. Audit entries store command hashes and lengths rather than the raw free-form command.
 - **Unrestricted runner roots are not a sandbox.** The root limits which worktrees can request approval; it does not prevent an approved command from touching other paths allowed by the operating system.
 - **Bearer token comparison uses `crypto.timingSafeEqual`** to reduce timing attack risk.

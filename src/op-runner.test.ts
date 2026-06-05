@@ -204,6 +204,24 @@ test("loadConfiguredScriptAllowlists supports multiple workspaceRoots in one all
   assert.equal(allowlists[1]?.commands[0]?.id, "deploy");
 });
 
+test("loadConfiguredScriptAllowlists parses workspace command opt-in", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    allowWorkspaceCommands: true,
+    commands: {},
+  });
+
+  const allowlist = loadConfiguredScriptAllowlists(
+    createScriptRunnerConfig(workspace),
+  )[0]!;
+
+  assert.equal(
+    (allowlist as { allowWorkspaceCommands?: boolean }).allowWorkspaceCommands,
+    true,
+  );
+  assert.deepEqual(allowlist.commands, []);
+});
+
 test("DefaultOpScriptRunner matches allowlist for sibling workspace root prefixes", async () => {
   const workspace = await createWorkspace({
     version: 1,
@@ -240,6 +258,55 @@ test("DefaultOpScriptRunner matches allowlist for sibling workspace root prefixe
   await assert.rejects(
     () => runner.list(unrelatedWorkspace),
     /does not have a startup-configured script allowlist/,
+  );
+});
+
+test("DefaultOpScriptRunner runs workspace commands from scoped workspace trust in connect mode", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    allowWorkspaceCommands: true,
+    commands: {},
+  });
+  const nestedWorkspace = join(workspace, "android-context");
+  await mkdir(nestedWorkspace, { recursive: true });
+  const processRunner = new FakeProcessRunner([
+    processResult({ stdout: "ok\n" }),
+  ]);
+  const config = createScriptRunnerConfig(workspace, {
+    authMode: "connect",
+    account: undefined,
+    connectHost: "http://127.0.0.1:8080",
+    connectToken: "connect-token",
+    connectTimeoutMs: 30_000,
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.runCommand(nestedWorkspace, "npm run db:migrate:dev");
+  const resolvedNestedWorkspace = await realpath(nestedWorkspace);
+
+  assert.equal(result.workspaceRoot, resolvedNestedWorkspace);
+  assert.equal(result.cwd, resolvedNestedWorkspace);
+  assert.equal(result.shell, "/bin/sh");
+  assert.deepEqual(result.shellArgs, ["-c", "npm run db:migrate:dev"]);
+  assert.equal(processRunner.calls[0]?.command, "/bin/sh");
+  assert.equal(processRunner.calls[0]?.cwd, resolvedNestedWorkspace);
+});
+
+test("DefaultOpScriptRunner rejects workspace commands outside connect mode", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    allowWorkspaceCommands: true,
+    commands: {},
+  });
+  const processRunner = new FakeProcessRunner([]);
+  const config = createScriptRunnerConfig(workspace);
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  await assert.rejects(
+    () => runner.runCommand(workspace, "npm run db:migrate:dev"),
+    /workspace commands require connect auth mode/i,
   );
 });
 
@@ -596,6 +663,43 @@ test("desktop auth validates the configured account and injects OP_ACCOUNT", asy
   assert.equal(result.stdout, "ok\n");
   assert.equal(commandCall?.env?.OP_ACCOUNT, "TestAccount");
   assert.equal(commandCall?.env?.OP_SESSION, undefined);
+});
+
+test("connect auth injects only supplied env without op CLI session", async () => {
+  const workspace = await createWorkspace({
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+        args: ["run", "deploy"],
+      },
+    },
+  });
+  const processRunner = new FakeProcessRunner([processResult({ stdout: "ok\n" })]);
+  const config = createScriptRunnerConfig(workspace, {
+    authMode: "connect",
+    account: undefined,
+  });
+  const sessionManager = new OpCliSessionManager(config, processRunner);
+  const runner = new DefaultOpScriptRunner(config, sessionManager, processRunner);
+
+  const result = await runner.run(workspace, "deploy", {
+    extraEnv: {
+      TF_TOKEN_app_terraform_io: "tf-secret",
+    },
+    secretRedactionValues: ["tf-secret"],
+  });
+  const commandCall = processRunner.calls.find(
+    (call) => call.command === TEST_COMMAND,
+  );
+
+  assert.equal(result.authMode, "connect");
+  assert.equal(result.stdout, "ok\n");
+  assert.equal(commandCall?.env?.TF_TOKEN_app_terraform_io, "tf-secret");
+  assert.equal(commandCall?.env?.OP_ACCOUNT, undefined);
+  assert.equal(commandCall?.env?.OP_SESSION, undefined);
+  assert.equal(commandCall?.env?.OP_SERVICE_ACCOUNT_TOKEN, undefined);
+  assert.equal(processRunner.calls.length, 1);
 });
 
 test("script runner injects extra env and redacts supplied secret values", async () => {
