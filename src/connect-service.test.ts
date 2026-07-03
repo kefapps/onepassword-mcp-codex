@@ -14,7 +14,7 @@ import { ConnectOnePasswordService, type ConnectClient } from "./connect-service
 function createConfig(): ServerConfig {
   return {
     authMode: "connect",
-    connectHost: "http://127.0.0.1:8080",
+    connectHost: "http://127.0.0.1:8090",
     connectToken: "connect-token",
     connectTimeoutMs: 30_000,
     enableSecretReveal: false,

@@ -458,7 +458,7 @@ async function createClientAndServer(
     authMode: options.authMode ?? "desktop",
     account: options.authMode === "connect" ? undefined : "TestAccount",
     connectHost:
-      options.authMode === "connect" ? "http://127.0.0.1:8080" : undefined,
+      options.authMode === "connect" ? "http://127.0.0.1:8090" : undefined,
     connectToken: options.authMode === "connect" ? "connect-token" : undefined,
     connectTimeoutMs: options.authMode === "connect" ? 30_000 : undefined,
     enableSecretReveal,
@@ -615,10 +615,11 @@ test("registers write tools only when enabled", async () => {
 
   assert(tools.tools.some((tool) => tool.name === "item_request_create"));
   assert(tools.tools.some((tool) => tool.name === "item_request_list"));
-  assert(tools.tools.some((tool) => tool.name === "password_create"));
   assert(tools.tools.some((tool) => tool.name === "password_update"));
   assert(tools.tools.some((tool) => tool.name === "vault_create"));
   assert(tools.tools.some((tool) => tool.name === "item_update"));
+  assert(!tools.tools.some((tool) => tool.name === "password_create"));
+  assert(!tools.tools.some((tool) => tool.name === "item_create"));
   assert(!tools.tools.some((tool) => tool.name === "item_delete"));
 });
 
@@ -638,9 +639,7 @@ test("connect mode registers only Connect-supported backend tools", async () => 
   assert(names.has("item_get_metadata"));
   assert(names.has("item_request_create"));
   assert(names.has("item_request_list"));
-  assert(names.has("password_create"));
   assert(names.has("password_update"));
-  assert(names.has("item_create"));
   assert(names.has("item_update"));
   assert(names.has("item_delete"));
   assert(names.has("password_read"));
@@ -1244,38 +1243,6 @@ test("item_request_list reports provenance and fill status without exposing secr
   assert.doesNotMatch(JSON.stringify(payload), /__FILL_ME__/);
 });
 
-test("password create stores a generated secret and returns redacted metadata", async () => {
-  const { client, auditLogger, service } = await createClientAndServer(false, {
-    enableWrites: true,
-  });
-  const result = await client.callTool({
-    name: "password_create",
-    arguments: {
-      vaultId: "vault-1",
-      title: "Generated Login",
-      username: "alice",
-      mode: "random",
-      randomLength: 18,
-    },
-  });
-
-  const payload = result.structuredContent as {
-    item: {
-      title: string;
-      fields: Array<{ valueState: string }>;
-    };
-    generatedSecret: boolean;
-    secretLength: number;
-  };
-
-  assert.equal(payload.item.title, "Generated Login");
-  assert.equal(payload.item.fields[1]?.valueState, "redacted");
-  assert.equal(payload.generatedSecret, true);
-  assert.equal(payload.secretLength, 18);
-  assert.equal(service.item.title, "Generated Login");
-  assert.equal(auditLogger.events.at(-1)?.action, "password_create");
-});
-
 test("write tools return useful messages for structured SDK errors", async () => {
   const { client, auditLogger, service } = await createClientAndServer(false, {
     enableWrites: true,
@@ -1284,40 +1251,23 @@ test("write tools return useful messages for structured SDK errors", async () =>
     throw { message: "structured SDK create failure", code: "OP_CREATE_FAILED" };
   };
 
-  const passwordCreate = await client.callTool({
-    name: "password_create",
+  const requestCreate = await client.callTool({
+    name: "item_request_create",
     arguments: {
       vaultId: "vault-1",
-      title: "Broken Login",
-      mode: "random",
+      title: "Broken API key",
+      project: "Tests",
+      justification: "Exercise structured SDK create failures.",
+      credentialFields: [{ title: "api_key" }],
     },
   });
-  const passwordCreateText =
-    (passwordCreate.content as Array<{ text?: string }>)[0]?.text ?? "";
+  const requestCreateText =
+    (requestCreate.content as Array<{ text?: string }>)[0]?.text ?? "";
 
-  assert.equal(passwordCreate.isError, true);
-  assert.match(passwordCreateText, /structured SDK create failure/);
-  assert.match(passwordCreateText, /OP_CREATE_FAILED/);
-  assert.notEqual(passwordCreateText, "[object Object]");
-  assert.equal(
-    auditLogger.events.at(-1)?.errorMessage,
-    "structured SDK create failure (code=OP_CREATE_FAILED)",
-  );
-
-  const itemCreate = await client.callTool({
-    name: "item_create",
-    arguments: {
-      vaultId: "vault-1",
-      category: ItemCategory.Login,
-      title: "Broken Item",
-    },
-  });
-  const itemCreateText = (itemCreate.content as Array<{ text?: string }>)[0]?.text ?? "";
-
-  assert.equal(itemCreate.isError, true);
-  assert.match(itemCreateText, /structured SDK create failure/);
-  assert.match(itemCreateText, /OP_CREATE_FAILED/);
-  assert.notEqual(itemCreateText, "[object Object]");
+  assert.equal(requestCreate.isError, true);
+  assert.match(requestCreateText, /structured SDK create failure/);
+  assert.match(requestCreateText, /OP_CREATE_FAILED/);
+  assert.notEqual(requestCreateText, "[object Object]");
   assert.equal(
     auditLogger.events.at(-1)?.errorMessage,
     "structured SDK create failure (code=OP_CREATE_FAILED)",

@@ -108,7 +108,7 @@ test("parseConfig accepts local Connect auth mode", () => {
     const config = parseConfig(["--auth-mode=connect"], "0.1.0");
 
     assert.equal(config.authMode, "connect");
-    assert.equal(config.connectHost, "http://127.0.0.1:8080");
+    assert.equal(config.connectHost, "http://127.0.0.1:8090");
     assert.equal(config.connectToken, "connect-token");
     assert.equal(config.connectTimeoutMs, 30_000);
     assert.equal(config.account, undefined);
@@ -123,7 +123,7 @@ test("parseConnectOnlyConfig defaults to Connect auth", () => {
     const config = parseConnectOnlyConfig([], "0.1.0");
 
     assert.equal(config.authMode, "connect");
-    assert.equal(config.connectHost, "http://127.0.0.1:8080");
+    assert.equal(config.connectHost, "http://127.0.0.1:8090");
     assert.equal(config.connectToken, "connect-token");
     assert.equal(config.account, undefined);
     assert.equal(config.serviceAccountToken, undefined);
@@ -303,7 +303,7 @@ test("parseConfig accepts connect-backed script runner without op CLI auth", () 
   const config = parseConfig(
     [
       "--auth-mode=connect",
-      "--connect-host=http://127.0.0.1:8080",
+      "--connect-host=http://127.0.0.1:8090",
       "--connect-token=connect-token",
       "--enable-script-runner=true",
       "--script-runner-root=/tmp",

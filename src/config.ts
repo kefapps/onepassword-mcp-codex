@@ -249,7 +249,7 @@ function isLocalHttpHost(host: string): boolean {
 }
 
 function parseConnectHost(value: string | undefined): string {
-  const rawHost = value ?? "http://127.0.0.1:8080";
+  const rawHost = value ?? "http://127.0.0.1:8090";
   let url: URL;
   try {
     url = new URL(rawHost);
@@ -309,7 +309,7 @@ export function parseConfig(argv: string[], packageVersion: string): ServerConfi
         "  --auth-mode=desktop|service-account|connect",
         "  --account=<1password account name or UUID>",
         "  --service-account-token=<token>",
-        "  --connect-host=<http://127.0.0.1:8080>",
+        "  --connect-host=<http://127.0.0.1:8090>",
         "  --connect-token=<token>",
         "  --connect-timeout-ms=<milliseconds>",
         "  --enable-secret-reveal=true|false",
@@ -751,7 +751,7 @@ export function parseConnectOnlyConfig(
         "Connect-only 1Password MCP server. Desktop and service-account auth are not available.",
         "",
         "Options:",
-        "  --connect-host=<http://127.0.0.1:8080>",
+        "  --connect-host=<http://127.0.0.1:8090>",
         "  --connect-token=[REDACTED:API key param]",
         "  --connect-timeout-ms=<milliseconds>",
         "  --enable-secret-reveal=true|false",
