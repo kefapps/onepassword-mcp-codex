@@ -32,6 +32,8 @@ export const SDK_CAPABILITIES = {
     "vault_permissions_revoke_group",
     "item_search",
     "item_get_metadata",
+    "item_request_create",
+    "item_request_list",
     "item_create",
     "item_update",
     "item_archive",
@@ -72,6 +74,7 @@ export const SDK_CAPABILITIES = {
     "Desktop auth requires the 1Password desktop app beta with SDK integration enabled.",
     "Secrets are opaque by default. Plaintext reveal is disabled unless the server starts with --enable-secret-reveal=true.",
     "When a secret is needed only by a command or local script, prefer op_script_run with envSecretRefs instead of password_read reveal or secret_reveal; the server injects values into the child process without returning plaintext to the model.",
+    "For new credentials that need to live in 1Password, prefer item_request_create: declare credential field names only, let the user fill the returned op:// references in 1Password, then use item_request_list to review managed items.",
     "Password generator tools return new plaintext secrets only with a reason and generated-secret acknowledgement.",
     "Write, destructive, and permission mutation tools are separately gated behind startup flags; destructive and permission mutation calls require per-call acknowledgement.",
     "The allowlisted script runner is disabled unless the server starts with --enable-script-runner=true.",
@@ -114,6 +117,7 @@ export function effectiveSupportedTools(config: ServerConfig): string[] {
     if (
       (tool === "password_create" ||
         tool === "password_update" ||
+        tool === "item_request_create" ||
         tool === "item_create" ||
         tool === "item_update") &&
       !config.enableWrites

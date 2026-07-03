@@ -58,6 +58,18 @@ import {
   encodePermissions,
 } from "./permissions.js";
 import { redactItem, redactItemOverview, redactVault } from "./redaction.js";
+import {
+  FILL_SENTINEL,
+  STATUS_AWAITING_FILL,
+  buildCredentialFields,
+  buildManagedTags,
+  buildProvenanceFields,
+  credentialReferences,
+  isManagedItem,
+  requestSections,
+  summarizeRequestItem,
+  type CredentialFieldSpec,
+} from "./item-request.js";
 import type { OnePasswordService } from "./service.js";
 import {
   DefaultUnrestrictedRunner,
@@ -1694,6 +1706,125 @@ export function createOnePasswordMcpServer(
 
   if (config.enableWrites) {
     server.registerTool(
+      "item_request_create",
+    {
+      description:
+        "Create a 1Password item with placeholder credential fields that the user fills in later, so the secret never passes through the agent. Declare field names only; the server writes '__FILL_ME__', records provenance, and returns op:// references for the user to fill in 1Password. Prefer this whenever a new secret needs to live in 1Password.",
+      inputSchema: {
+        vaultId: z
+          .string()
+          .min(1)
+          .describe("Target vault id from vault_list. Ask the user which vault if unsure."),
+        title: z
+          .string()
+          .min(1)
+          .describe("Human-readable item title, e.g. 'Stripe API key (billing worker)'."),
+        category: z
+          .nativeEnum(ItemCategory)
+          .optional()
+          .describe("1Password item category. Defaults to Login."),
+        project: z
+          .string()
+          .min(1)
+          .describe("Required project or repository requesting this credential."),
+        justification: z
+          .string()
+          .min(1)
+          .describe("Required explanation of why this credential is needed and what consumes it."),
+        linearTicketId: z.string().min(1).optional().describe("Optional Linear issue id."),
+        linearTicketUrl: z.string().url().optional().describe("Optional Linear issue URL."),
+        linearTicketTitle: z.string().min(1).optional().describe("Optional Linear issue title."),
+        credentialFields: z
+          .array(
+            z.object({
+              title: z.string().min(1).describe("Field name only. Do not include a value."),
+              fieldType: z
+                .enum(["Concealed", "Text"])
+                .optional()
+                .describe("Concealed by default for secrets; Text for a non-secret placeholder."),
+            }),
+          )
+          .min(1)
+          .describe("Credential fields to provision. The server writes '__FILL_ME__'."),
+        knownFields: z
+          .array(
+            z.object({
+              title: z.string().min(1).describe("Known non-secret field name."),
+              value: z.string().describe("Known non-secret value."),
+            }),
+          )
+          .optional()
+          .describe("Optional non-secret values such as username, endpoint, or account id."),
+        tags: z.array(z.string()).optional().describe("Extra tags merged with managed tags."),
+        websites: z.array(websiteSchema).optional().describe("Optional associated website URLs."),
+      },
+    },
+    async (args) => {
+      const ticket =
+        args.linearTicketId || args.linearTicketUrl || args.linearTicketTitle
+          ? {
+              id: args.linearTicketId,
+              url: args.linearTicketUrl,
+              title: args.linearTicketTitle,
+            }
+          : undefined;
+      const category = args.category ?? ItemCategory.Login;
+      const params: ItemCreateParams = {
+        vaultId: args.vaultId,
+        title: args.title,
+        category,
+        tags: buildManagedTags(args.project, ticket, args.tags),
+        sections: requestSections(),
+        fields: [
+          ...buildProvenanceFields({
+            project: args.project,
+            justification: args.justification,
+            ticket,
+          }),
+          ...buildCredentialFields(
+            args.credentialFields as CredentialFieldSpec[],
+            args.knownFields,
+          ),
+        ],
+        websites: toWebsites(args.websites),
+      };
+
+      try {
+        const item = await service.itemCreate(params);
+        recordAudit(auditLogger, "item_request_create", "success", {
+          vaultId: args.vaultId,
+          title: args.title,
+          project: args.project,
+          ticketId: ticket?.id,
+          credentialFieldCount: args.credentialFields.length,
+        });
+        return jsonResult({
+          item: redactItem(item),
+          references: credentialReferences(item),
+          status: STATUS_AWAITING_FILL,
+          placeholder: FILL_SENTINEL,
+          instructions:
+            "Placeholder values were stored. Ask the user to fill the referenced op:// fields in 1Password; use those op:// paths instead of requesting the secret.",
+        });
+      } catch (error) {
+        recordAudit(
+          auditLogger,
+          "item_request_create",
+          "error",
+          {
+            vaultId: args.vaultId,
+            title: args.title,
+            project: args.project,
+            ticketId: ticket?.id,
+          },
+          error,
+        );
+        throw normalizeError(error);
+      }
+    },
+  );
+
+    server.registerTool(
       "password_create",
     {
       description:
@@ -2187,6 +2318,81 @@ export function createOnePasswordMcpServer(
       return jsonResult({
         items: results.slice(0, limit ?? 50),
         totalMatched: results.length,
+        searchedVaultCount: targetVaults.length,
+        failedVaultCount: failures.length,
+        partialFailure: failures.length > 0,
+        failures,
+      });
+    },
+  );
+
+  server.registerTool(
+    "item_request_list",
+    {
+      description:
+        "Review placeholder items created with item_request_create and tagged 'mcp-managed'. Returns provenance plus filled/awaiting-fill status without returning credential values.",
+      inputSchema: {
+        vaultId: z
+          .string()
+          .optional()
+          .describe("Restrict to a single vault id. Omit to scan every visible vault."),
+        project: z
+          .string()
+          .optional()
+          .describe("Only return items whose provenance project matches this value."),
+        onlyAwaitingFill: z
+          .boolean()
+          .optional()
+          .describe("When true, return only items the user has not filled yet."),
+        limit: z.number().int().positive().max(200).optional().describe("Default 50."),
+      },
+    },
+    async ({ vaultId, project, onlyAwaitingFill, limit }) => {
+      const targetVaults =
+        vaultId !== undefined
+          ? [{ id: vaultId }]
+          : await service.vaultList({ decryptDetails: false });
+
+      const itemFilters = createItemFilters(false);
+      const projectFilter = project?.trim().toLowerCase();
+      const results: ReturnType<typeof summarizeRequestItem>[] = [];
+      const failures: Array<{ vaultId: string; errorMessage: string }> = [];
+
+      for (const vault of targetVaults) {
+        try {
+          const overviews = await service.itemList(vault.id, ...itemFilters);
+          for (const overview of overviews) {
+            if (!isManagedItem(overview.tags)) {
+              continue;
+            }
+            const item = await service.itemGet(vault.id, overview.id);
+            const summary = summarizeRequestItem(item);
+            if (onlyAwaitingFill && summary.filled) {
+              continue;
+            }
+            if (
+              projectFilter &&
+              (summary.project ?? "").trim().toLowerCase() !== projectFilter
+            ) {
+              continue;
+            }
+            results.push(summary);
+          }
+        } catch (error) {
+          if (vaultId !== undefined) {
+            throw normalizeError(error);
+          }
+          failures.push({
+            vaultId: vault.id,
+            errorMessage: errorMessage(error),
+          });
+        }
+      }
+
+      return jsonResult({
+        items: results.slice(0, limit ?? 50),
+        totalMatched: results.length,
+        awaitingFillCount: results.filter((summary) => !summary.filled).length,
         searchedVaultCount: targetVaults.length,
         failedVaultCount: failures.length,
         partialFailure: failures.length > 0,

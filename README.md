@@ -230,6 +230,17 @@ When an agent needs a secret only to run a local command, it should not call `pa
 
 This keeps the plaintext secret out of the model transcript while still letting the command receive it.
 
+## Tracked Secret Requests
+
+When an agent needs a new credential to exist in 1Password, prefer `item_request_create` over asking the user to paste the value. The tool creates a managed item with:
+
+- credential fields initialized to the `__FILL_ME__` placeholder;
+- provenance fields for `project`, `justification`, and optional Linear ticket details;
+- managed tags such as `mcp-managed`, `awaiting-fill`, and `project:<slug>`;
+- `op://` references that the agent can wire into configs or scripts.
+
+The user fills the returned references in 1Password. Later, `item_request_list` reports which managed items are still awaiting fill, without returning the credential values.
+
 ## Unrestricted Runner
 
 The unrestricted runner is a separate, dangerous escape hatch for trusted local worktrees where allowlisting every command is too expensive. Enable it only for roots you are willing to approve for arbitrary command execution:

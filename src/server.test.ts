@@ -612,6 +612,8 @@ test("registers write tools only when enabled", async () => {
   const { client } = await createClientAndServer(false, { enableWrites: true });
   const tools = await client.listTools();
 
+  assert(tools.tools.some((tool) => tool.name === "item_request_create"));
+  assert(tools.tools.some((tool) => tool.name === "item_request_list"));
   assert(tools.tools.some((tool) => tool.name === "password_create"));
   assert(tools.tools.some((tool) => tool.name === "password_update"));
   assert(tools.tools.some((tool) => tool.name === "vault_create"));
@@ -633,6 +635,8 @@ test("connect mode registers only Connect-supported backend tools", async () => 
   assert(names.has("vault_get"));
   assert(names.has("item_search"));
   assert(names.has("item_get_metadata"));
+  assert(names.has("item_request_create"));
+  assert(names.has("item_request_list"));
   assert(names.has("password_create"));
   assert(names.has("password_update"));
   assert(names.has("item_create"));
@@ -1048,6 +1052,133 @@ test("password generators return plaintext values", async () => {
   assert.match(memorableText, /\./);
   assert.equal(auditLogger.events.at(-2)?.action, "password_generate");
   assert.equal(auditLogger.events.at(-1)?.action, "password_generate_memorable");
+});
+
+test("item_request_create stores placeholders with provenance and returns op references", async () => {
+  const { client, auditLogger, service } = await createClientAndServer(false, {
+    enableWrites: true,
+  });
+  const result = await client.callTool({
+    name: "item_request_create",
+    arguments: {
+      vaultId: "vault-1",
+      title: "Stripe API Key",
+      project: "My Project",
+      justification: "Needed to call the Stripe billing API from the worker.",
+      linearTicketId: "ENG-123",
+      linearTicketUrl: "https://linear.app/acme/issue/ENG-123",
+      credentialFields: [{ title: "api_key" }, { title: "webhook_secret" }],
+      knownFields: [{ title: "account_id", value: "acct_123" }],
+    },
+  });
+
+  const payload = result.structuredContent as {
+    item: {
+      title: string;
+      tags: string[];
+      fields: Array<{ valueState: string }>;
+    };
+    references: string[];
+    status: string;
+    placeholder: string;
+  };
+
+  assert.equal(payload.item.title, "Stripe API Key");
+  assert.equal(payload.status, "awaiting-fill");
+  assert.equal(payload.placeholder, "__FILL_ME__");
+  assert.equal(payload.references.length, 3);
+  for (const reference of payload.references) {
+    assert.match(reference, /^op:\/\/vault-1\/item-created\/credentials\//);
+  }
+  assert(payload.item.tags.includes("mcp-managed"));
+  assert(payload.item.tags.includes("awaiting-fill"));
+  assert(payload.item.tags.includes("project:my-project"));
+  assert(payload.item.tags.includes("linear:ENG-123"));
+  for (const field of payload.item.fields) {
+    assert.equal(field.valueState, "redacted");
+  }
+  assert(
+    service.item.fields.some(
+      (field) => field.id === "cred_api-key" && field.value === "__FILL_ME__",
+    ),
+  );
+  assert(
+    service.item.fields.some(
+      (field) =>
+        field.id === "mcp_prov_justification" &&
+        field.value === "Needed to call the Stripe billing API from the worker.",
+    ),
+  );
+  assert.equal(auditLogger.events.at(-1)?.action, "item_request_create");
+});
+
+test("item_request_create rejects missing provenance", async () => {
+  const { client } = await createClientAndServer(false, { enableWrites: true });
+  const result = await client.callTool({
+    name: "item_request_create",
+    arguments: {
+      vaultId: "vault-1",
+      title: "No Provenance",
+      credentialFields: [{ title: "api_key" }],
+    },
+  });
+
+  assert.equal(result.isError, true);
+});
+
+test("item_request_list reports provenance and fill status without exposing secrets", async () => {
+  const { client, service } = await createClientAndServer(false, {
+    enableWrites: true,
+  });
+
+  await client.callTool({
+    name: "item_request_create",
+    arguments: {
+      vaultId: "vault-1",
+      title: "Stripe API Key",
+      project: "Billing",
+      justification: "Stripe billing API access.",
+      credentialFields: [{ title: "api_key" }],
+    },
+  });
+
+  const managed = service.item;
+  service.itemList = async () => [
+    {
+      id: managed.id,
+      title: managed.title,
+      category: managed.category,
+      vaultId: managed.vaultId,
+      websites: [],
+      tags: managed.tags,
+      createdAt: managed.createdAt,
+      updatedAt: managed.updatedAt,
+      state: ItemState.Active,
+    },
+  ];
+  service.itemGet = async () => managed;
+
+  const result = await client.callTool({
+    name: "item_request_list",
+    arguments: { onlyAwaitingFill: true },
+  });
+  const payload = result.structuredContent as {
+    items: Array<{
+      project?: string;
+      justification?: string;
+      filled: boolean;
+      pendingFieldCount: number;
+    }>;
+    awaitingFillCount: number;
+  };
+
+  assert.equal(payload.items.length, 1);
+  assert.equal(payload.items[0]?.project, "Billing");
+  assert.equal(payload.items[0]?.justification, "Stripe billing API access.");
+  assert.equal(payload.items[0]?.filled, false);
+  assert.equal(payload.items[0]?.pendingFieldCount, 1);
+  assert.equal(payload.awaitingFillCount, 1);
+  assert.doesNotMatch(JSON.stringify(payload), /__FILL_ME__/);
 });
 
 test("password create stores a generated secret and returns redacted metadata", async () => {

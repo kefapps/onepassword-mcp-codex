@@ -42,6 +42,6 @@ For item writes, add `--enable-writes=true`. For item delete, add `--enable-dest
 
 ## POC Limits
 
-Connect mode supports vault/item reads, item create/update/delete, `password_create`, `password_update`, `password_read`, and `secret_reveal`.
+Connect mode supports vault/item reads, tracked placeholder creation through `item_request_create`, managed-item review through `item_request_list`, item create/update/delete, `password_create`, `password_update`, `password_read`, and `secret_reveal`.
 
 Connect mode does not expose vault create/update/delete, group permissions, 1Password Environments, files, or `item_archive`.
