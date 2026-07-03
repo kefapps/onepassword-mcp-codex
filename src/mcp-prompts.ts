@@ -118,8 +118,8 @@ export function registerOnePasswordPrompts(server: McpServer): void {
           `Generated passwords are returned in plaintext, so include a concrete \`reason\` and the acknowledgement string \`${GENERATED_SECRET_ACK}\`.`,
           "Explain the tradeoff briefly: random passwords maximize entropy density; memorable passphrases are easier to type correctly.",
           vaultId && title
-            ? `After generation, store it with \`password_create\` in vault \`${vaultId}\` with title \`${title}\`, unless the user wants generation-only.`
-            : "If the user also wants storage, use `password_create` after generation.",
+            ? `If the user wants storage, create a tracked placeholder with \`item_request_create\` in vault \`${vaultId}\` with title \`${title}\`, then have the user fill the returned op:// reference directly in 1Password.`
+            : "If the user also wants storage, use `item_request_create` to create a tracked placeholder and have the user fill the returned op:// reference directly in 1Password.",
           "Do not reveal an existing stored password unless the user explicitly asks for plaintext.",
         ].join("\n"),
       ),

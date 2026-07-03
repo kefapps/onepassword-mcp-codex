@@ -373,22 +373,23 @@ async function runWriteChecks(client) {
   const title = `mcp-smoke-${new Date().toISOString()}`;
   let createdItemId;
 
-  await runStep("create disposable password item", async () => {
+  await runStep("create disposable tracked secret request item", async () => {
     const result = await client.callTool({
-      name: "password_create",
+      name: "item_request_create",
       arguments: {
         vaultId,
         title,
-        username: "mcp-smoke",
-        mode: "random",
-        randomLength: 24,
+        project: "mcp-smoke",
+        justification: "Smoke test tracked secret request workflow.",
+        credentialFields: [{ title: "password" }],
+        knownFields: [{ title: "username", value: "mcp-smoke" }],
         tags: ["mcp-smoke-test"],
       },
     });
-    assertToolOk(result, "password_create");
+    assertToolOk(result, "item_request_create");
     createdItemId = result.structuredContent?.item?.id;
     if (!createdItemId) {
-      throw new Error("password_create did not return the created item id.");
+      throw new Error("item_request_create did not return the created item id.");
     }
   });
 

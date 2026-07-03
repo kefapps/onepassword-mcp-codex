@@ -4,7 +4,7 @@ This POC runs 1Password Connect locally and keeps every container-facing port bo
 
 ## Persistent Compose
 
-The repository includes `docker-compose.connect.yml` for the local Connect containers. It mounts the ignored runtime credentials from `.local/onepassword-connect/1password-credentials.json`, exposes only the API on `127.0.0.1:8080`, and uses `restart: unless-stopped` so containers come back when Docker starts unless you explicitly stop them.
+The repository includes `docker-compose.connect.yml` for the local Connect containers. It mounts the ignored runtime credentials from `.local/onepassword-connect/1password-credentials.json`, exposes only the API on `127.0.0.1:8090`, and uses `restart: unless-stopped` so containers come back when Docker starts unless you explicitly stop them.
 
 Start it from the repository root:
 
@@ -27,7 +27,7 @@ cp /path/to/1password-credentials.json .local/onepassword-connect/1password-cred
 docker compose -f .local/onepassword-connect/docker-compose.yml up -d
 ```
 
-The API container is published as `127.0.0.1:8080:8080`. The sync container is not published on the host.
+The API container is published as `127.0.0.1:8090:8080`. The sync container is not published on the host.
 
 ## Run The MCP Against Connect
 
@@ -35,13 +35,13 @@ The API container is published as `127.0.0.1:8080:8080`. The sync container is n
 OP_CONNECT_TOKEN="<connect-token>" \
 npm start -- \
   --auth-mode=connect \
-  --connect-host=http://127.0.0.1:8080
+  --connect-host=http://127.0.0.1:8090
 ```
 
-For item writes, add `--enable-writes=true`. For item delete, add `--enable-destructive-actions=true` and use the existing destructive-action acknowledgement on each call.
+For tracked item requests and item updates, add `--enable-writes=true`. For item delete, add `--enable-destructive-actions=true` and use the existing destructive-action acknowledgement on each call.
 
 ## POC Limits
 
-Connect mode supports vault/item reads, tracked placeholder creation through `item_request_create`, managed-item review through `item_request_list`, item create/update/delete, `password_create`, `password_update`, `password_read`, and `secret_reveal`.
+Connect mode supports vault/item reads, tracked placeholder creation through `item_request_create`, managed-item review through `item_request_list`, item update/delete, `password_update`, `password_read`, and `secret_reveal`.
 
-Connect mode does not expose vault create/update/delete, group permissions, 1Password Environments, files, or `item_archive`.
+Connect mode does not expose generic `password_create` or `item_create`, vault create/update/delete, group permissions, 1Password Environments, files, or `item_archive`.

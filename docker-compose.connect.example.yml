@@ -2,7 +2,7 @@ services:
   op-connect-api:
     image: 1password/connect-api:latest
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8090:8080"
     volumes:
       - "./1password-credentials.json:/home/opuser/.op/1password-credentials.json:ro"
       - "onepassword-connect-data:/home/opuser/.op/data"

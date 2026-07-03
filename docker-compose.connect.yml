@@ -20,7 +20,7 @@ services:
     <<: *onepassword-connect-common
     image: 1password/connect-api:latest
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8090:8080"
 
   op-connect-sync:
     <<: *onepassword-connect-common

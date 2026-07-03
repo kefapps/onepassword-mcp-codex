@@ -18,7 +18,6 @@ export const SDK_CAPABILITIES = {
     "password_generate",
     "password_generate_memorable",
     "password_read",
-    "password_create",
     "password_update",
     "vault_list",
     "vault_get",
@@ -34,7 +33,6 @@ export const SDK_CAPABILITIES = {
     "item_get_metadata",
     "item_request_create",
     "item_request_list",
-    "item_create",
     "item_update",
     "item_archive",
     "item_delete",
@@ -77,7 +75,7 @@ export const SDK_CAPABILITIES = {
     "Desktop auth requires the 1Password desktop app beta with SDK integration enabled.",
     "Secrets are opaque by default. Plaintext reveal is disabled unless the server starts with --enable-secret-reveal=true.",
     "When a secret is needed only by a command or local script, prefer workspace_command_run in Connect mode and op_script_run in Desktop/service-account mode with envSecretRefs instead of password_read reveal or secret_reveal; the server injects values into the child process without returning plaintext to the model.",
-    "For new credentials that need to live in 1Password, prefer item_request_create: declare credential field names only, let the user fill the returned op:// references in 1Password, then use item_request_list to review managed items.",
+    "Item creation goes exclusively through item_request_create: declare credential field names only, let the user fill the returned op:// references in 1Password, then use item_request_list to review managed items. The generic password_create and item_create tools are intentionally unavailable.",
     "Password generator tools return new plaintext secrets only with a reason and generated-secret acknowledgement.",
     "Write, destructive, and permission mutation tools are separately gated behind startup flags; destructive and permission mutation calls require per-call acknowledgement.",
     "The script runner is disabled unless the server starts with --enable-script-runner=true.",
@@ -140,10 +138,8 @@ export function effectiveSupportedTools(config: ServerConfig): string[] {
       return config.authMode !== "connect" && config.enableUnrestrictedRunner;
     }
     if (
-      (tool === "password_create" ||
-        tool === "password_update" ||
+      (tool === "password_update" ||
         tool === "item_request_create" ||
-        tool === "item_create" ||
         tool === "item_update") &&
       !config.enableWrites
     ) {

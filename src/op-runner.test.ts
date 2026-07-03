@@ -270,7 +270,7 @@ test("DefaultOpScriptRunner matches allowlist for sibling workspace root prefixe
     {
       ...config,
       authMode: "connect",
-      connectHost: "http://127.0.0.1:8080",
+      connectHost: "http://127.0.0.1:8090",
       connectToken: "connect-token",
       connectTimeoutMs: 30_000,
     },
@@ -303,7 +303,7 @@ test("DefaultOpScriptRunner runs workspace commands from scoped workspace trust 
   const config = createScriptRunnerConfig(workspace, {
     authMode: "connect",
     account: undefined,
-    connectHost: "http://127.0.0.1:8080",
+    connectHost: "http://127.0.0.1:8090",
     connectToken: "connect-token",
     connectTimeoutMs: 30_000,
   });

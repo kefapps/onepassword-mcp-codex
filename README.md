@@ -9,7 +9,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes
 ## Features
 
 - Read and search vaults, items, and environments with secrets redacted by default.
-- Create, update, archive, and delete items and vaults when write/destructive capabilities are enabled.
+- Create tracked item requests, then update, archive, and delete items and vaults when write/destructive capabilities are enabled.
 - Manage group permissions on vaults when permission mutation is enabled.
 - Reveal plaintext secrets only on explicit request with a per-call acknowledgement.
 - Generate plaintext passwords only with a reason and explicit acknowledgement.
@@ -40,7 +40,7 @@ npm install -g mcp-1password@beta
 
 # Connect-only binary after global install
 OP_CONNECT_TOKEN="<connect-token>" \
-mcp-1password-connect --connect-host=http://127.0.0.1:8080
+mcp-1password-connect --connect-host=http://127.0.0.1:8090
 
 # Run on demand without a global install
 npx -y mcp-1password@beta --auth-mode=desktop --account="My Account"
@@ -60,7 +60,7 @@ mcp-1password-connect trust-workspace
 
 OP_CONNECT_TOKEN="<connect-token>" \
 mcp-1password-connect \
-  --connect-host=http://127.0.0.1:8080 \
+  --connect-host=http://127.0.0.1:8090 \
   --enable-script-runner=true \
   --script-runner-allowlist-manifest="$HOME/.onepassword-mcp/workspace-trust.json"
 ```
@@ -116,10 +116,10 @@ Run the local Connect containers from `docker-compose.connect.example.yml`, then
 OP_CONNECT_TOKEN="<connect-token>" \
 mcp-1password \
   --auth-mode=connect \
-  --connect-host=http://127.0.0.1:8080
+  --connect-host=http://127.0.0.1:8090
 ```
 
-Connect mode supports vault/item reads and item create/update/delete. It does not expose vault mutation, group permissions, 1Password Environments, files, or item archive. See `docs/connect-local-poc.md`.
+Connect mode supports vault/item reads, tracked placeholder creation through `item_request_create`, managed-item review through `item_request_list`, item update/delete, `password_update`, `password_read`, and `secret_reveal`. It does not expose generic `password_create` or `item_create`, vault mutation, group permissions, 1Password Environments, files, or item archive. See `docs/connect-local-poc.md`.
 
 ### HTTP Transport (Remote Agents)
 
@@ -142,11 +142,11 @@ Every flag can also be set through an environment variable.
 | `--auth-mode` | `OP_MCP_AUTH_MODE` | `desktop` | `desktop`, `service-account`, or `connect` |
 | `--account` | `OP_MCP_ACCOUNT` | - | Account name or UUID, required in desktop mode |
 | `--service-account-token` | `OP_SERVICE_ACCOUNT_TOKEN` | - | Token, required in service-account mode |
-| `--connect-host` | `OP_CONNECT_HOST` | `http://127.0.0.1:8080` | Localhost Connect API URL, required to stay on localhost for this POC |
+| `--connect-host` | `OP_CONNECT_HOST` | `http://127.0.0.1:8090` | Localhost Connect API URL, required to stay on localhost for this POC |
 | `--connect-token` | `OP_CONNECT_TOKEN` | - | Connect access token, required in connect mode |
 | `--connect-timeout-ms` | `OP_MCP_CONNECT_TIMEOUT_MS` | `30000` | Connect request timeout |
 | `--enable-secret-reveal` | `OP_MCP_ENABLE_SECRET_REVEAL` | `false` | Allow plaintext secret reveal |
-| `--enable-writes` | `OP_MCP_ENABLE_WRITES` | `false` | Allow item and vault creation/update |
+| `--enable-writes` | `OP_MCP_ENABLE_WRITES` | `false` | Allow tracked item requests plus item/vault updates and vault creation |
 | `--enable-destructive-actions` | `OP_MCP_ENABLE_DESTRUCTIVE_ACTIONS` | `false` | Allow archive and delete operations |
 | `--enable-permission-mutation` | `OP_MCP_ENABLE_PERMISSION_MUTATION` | `false` | Allow vault permission changes |
 | `--enable-script-runner` | `OP_MCP_ENABLE_SCRIPT_RUNNER` | `false` | Allow execution of allowlisted scripts |
