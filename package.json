@@ -1,6 +1,6 @@
 {
   "name": "mcp-1password",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": false,
   "type": "module",
   "description": "Neutral MCP server for 1Password integrations with opaque-by-default secret handling.",
