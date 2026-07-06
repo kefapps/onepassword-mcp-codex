@@ -76,6 +76,13 @@ interface ResolvedScriptAllowlist {
   requestedWorkspaceRoot: string;
 }
 
+interface ResolvedScriptAllowlistPath {
+  path: string;
+  source: "direct" | "manifest";
+  manifestPath?: string;
+  manifestEntry?: string;
+}
+
 export interface OpSessionStatus {
   enabled: boolean;
   authMode: ResolvedOpCliAuthMode;
@@ -1011,6 +1018,21 @@ function assertWorkspaceRootAllowed(
   }
 }
 
+function warnSkippedManifestAllowlist(
+  entry: ResolvedScriptAllowlistPath,
+  reason: unknown,
+): void {
+  const detail = reason instanceof Error ? reason.message : String(reason);
+  const manifest = entry.manifestPath ? ` from manifest ${entry.manifestPath}` : "";
+  const originalEntry =
+    entry.manifestEntry && entry.manifestEntry !== entry.path
+      ? ` (${entry.manifestEntry})`
+      : "";
+  console.warn(
+    `[mcp-1password] skipped workspace trust allowlist${manifest}: ${entry.path}${originalEntry}: ${detail}`,
+  );
+}
+
 export function loadConfiguredScriptAllowlists(
   config: Pick<
     ServerConfig,
@@ -1022,24 +1044,45 @@ export function loadConfiguredScriptAllowlists(
   const resolvedAllowedRoots = config.scriptRunnerRoots.map((root) =>
     realpathSync(root),
   );
-  const resolvedAllowlistPaths = loadConfiguredScriptAllowlistPaths(config);
+  const resolvedAllowlistPathEntries = loadConfiguredScriptAllowlistPathEntries(config);
 
-  return resolvedAllowlistPaths.flatMap((resolvedAllowlistPath) => {
-    const raw = readFileSync(resolvedAllowlistPath, "utf8");
-    const parsed = allowlistSchema.parse(JSON.parse(raw));
-    const workspaceRootEntries = resolveWorkspaceRootEntriesFromParsed(
-      resolvedAllowlistPath,
-      parsed,
-    );
+  return resolvedAllowlistPathEntries.flatMap((resolvedAllowlistPathEntry) => {
+    let parsed: z.infer<typeof allowlistSchema>;
+    let workspaceRootEntries: Array<{
+      workspaceRoot: string;
+      workspaceRootMatch?: "exact" | "prefix";
+    }>;
+    try {
+      const raw = readFileSync(resolvedAllowlistPathEntry.path, "utf8");
+      parsed = allowlistSchema.parse(JSON.parse(raw));
+      workspaceRootEntries = resolveWorkspaceRootEntriesFromParsed(
+        resolvedAllowlistPathEntry.path,
+        parsed,
+      );
+    } catch (error) {
+      if (resolvedAllowlistPathEntry.source === "manifest") {
+        warnSkippedManifestAllowlist(resolvedAllowlistPathEntry, error);
+        return [];
+      }
+      throw error;
+    }
 
     return workspaceRootEntries.flatMap(({ workspaceRoot, workspaceRootMatch }) => {
-      if (resolvedAllowedRoots.length > 0) {
-        assertWorkspaceRootAllowed(workspaceRoot, resolvedAllowedRoots);
+      try {
+        if (resolvedAllowedRoots.length > 0) {
+          assertWorkspaceRootAllowed(workspaceRoot, resolvedAllowedRoots);
+        }
+      } catch (error) {
+        if (resolvedAllowlistPathEntry.source === "manifest") {
+          warnSkippedManifestAllowlist(resolvedAllowlistPathEntry, error);
+          return [];
+        }
+        throw error;
       }
 
       return [
         scriptAllowlistFromParsed(
-          resolvedAllowlistPath,
+          resolvedAllowlistPathEntry.path,
           workspaceRoot,
           workspaceRootMatch,
           parsed,
@@ -1049,35 +1092,49 @@ export function loadConfiguredScriptAllowlists(
   });
 }
 
-function loadConfiguredScriptAllowlistPaths(
+function loadConfiguredScriptAllowlistPathEntries(
   config: Pick<
     ServerConfig,
     "scriptRunnerAllowlistPaths" | "scriptRunnerAllowlistManifestPaths"
   >,
-): string[] {
-  const directPaths = config.scriptRunnerAllowlistPaths.map((allowlistPath) =>
-    realpathSync(allowlistPath),
-  );
+): ResolvedScriptAllowlistPath[] {
+  const directPaths = config.scriptRunnerAllowlistPaths.map((allowlistPath) => ({
+    path: realpathSync(allowlistPath),
+    source: "direct" as const,
+  }));
   const manifestPaths = config.scriptRunnerAllowlistManifestPaths.flatMap(
     (manifestPath) => loadAllowlistPathsFromManifest(manifestPath),
   );
 
-  return [...new Set([...directPaths, ...manifestPaths])];
+  return [...directPaths, ...manifestPaths].filter(
+    (entry, index, entries) =>
+      entries.findIndex((candidate) => candidate.path === entry.path) === index,
+  );
 }
 
-function loadAllowlistPathsFromManifest(manifestPath: string): string[] {
+function loadAllowlistPathsFromManifest(manifestPath: string): ResolvedScriptAllowlistPath[] {
   const resolvedManifestPath = realpathSync(manifestPath);
   const raw = readFileSync(resolvedManifestPath, "utf8");
   const parsed = allowlistManifestSchema.parse(JSON.parse(raw));
   const base = dirname(resolvedManifestPath);
 
-  return parsed.allowlists.map((allowlistPath) =>
-    realpathSync(
-      isAbsolute(allowlistPath)
-        ? allowlistPath
-        : resolve(base, allowlistPath),
-    ),
-  );
+  return parsed.allowlists.flatMap((allowlistPath) => {
+    const resolvedAllowlistPath = isAbsolute(allowlistPath)
+      ? allowlistPath
+      : resolve(base, allowlistPath);
+    const entry: ResolvedScriptAllowlistPath = {
+      path: resolvedAllowlistPath,
+      source: "manifest",
+      manifestPath: resolvedManifestPath,
+      manifestEntry: allowlistPath,
+    };
+    try {
+      return [{ ...entry, path: realpathSync(resolvedAllowlistPath) }];
+    } catch (error) {
+      warnSkippedManifestAllowlist(entry, error);
+      return [];
+    }
+  });
 }
 
 async function resolveWorkspacePath(
