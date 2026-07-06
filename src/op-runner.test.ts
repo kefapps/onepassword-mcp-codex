@@ -386,8 +386,16 @@ test("loadConfiguredScriptAllowlists resolves allowlists from startup manifests"
   assert.equal(allowlists[1]?.commands[0]?.id, "migrate");
 });
 
-test("loadConfiguredScriptAllowlists applies trusted roots to manifest entries", async () => {
+test("loadConfiguredScriptAllowlists skips manifest entries outside trusted roots", async () => {
   const trustedRoot = await mkdtemp(join(tmpdir(), "op-runner-trusted-root-"));
+  const trustedWorkspace = await createWorkspaceUnder(trustedRoot, "project-a", {
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
   const outsideWorkspace = await createWorkspace({
     version: 1,
     commands: {
@@ -401,22 +409,60 @@ test("loadConfiguredScriptAllowlists applies trusted roots to manifest entries",
     manifestPath,
     JSON.stringify({
       version: 1,
-      allowlists: [allowlistPath(outsideWorkspace)],
+      allowlists: [
+        allowlistPath(outsideWorkspace),
+        allowlistPath(trustedWorkspace),
+      ],
     }),
     "utf8",
   );
 
-  assert.throws(
-    () =>
-      loadConfiguredScriptAllowlists(
-        createConfig({
-          scriptRunnerRoots: [trustedRoot],
-          scriptRunnerAllowlistPaths: [],
-          scriptRunnerAllowlistManifestPaths: [manifestPath],
-        }),
-      ),
-    /outside the configured script runner roots/,
+  const allowlists = loadConfiguredScriptAllowlists(
+    createConfig({
+      scriptRunnerRoots: [trustedRoot],
+      scriptRunnerAllowlistPaths: [],
+      scriptRunnerAllowlistManifestPaths: [manifestPath],
+    }),
   );
+
+  assert.equal(allowlists.length, 1);
+  assert.equal(allowlists[0]?.path, await realpath(allowlistPath(trustedWorkspace)));
+  assert.equal(allowlists[0]?.commands[0]?.id, "deploy");
+});
+
+test("loadConfiguredScriptAllowlists skips missing manifest entries", async () => {
+  const trustedRoot = await mkdtemp(join(tmpdir(), "op-runner-trusted-root-"));
+  const trustedWorkspace = await createWorkspaceUnder(trustedRoot, "project-a", {
+    version: 1,
+    commands: {
+      deploy: {
+        command: TEST_COMMAND,
+      },
+    },
+  });
+  const manifestPath = join(trustedRoot, "allowlists.json");
+  await writeFile(
+    manifestPath,
+    JSON.stringify({
+      version: 1,
+      allowlists: [
+        join(trustedRoot, "deleted-worktree", SCRIPT_ALLOWLIST_FILENAME),
+        allowlistPath(trustedWorkspace),
+      ],
+    }),
+    "utf8",
+  );
+
+  const allowlists = loadConfiguredScriptAllowlists(
+    createConfig({
+      scriptRunnerRoots: [trustedRoot],
+      scriptRunnerAllowlistPaths: [],
+      scriptRunnerAllowlistManifestPaths: [manifestPath],
+    }),
+  );
+
+  assert.equal(allowlists.length, 1);
+  assert.equal(allowlists[0]?.path, await realpath(allowlistPath(trustedWorkspace)));
 });
 
 test("DefaultOpScriptRunner rejects cwd outside workspace", async () => {
